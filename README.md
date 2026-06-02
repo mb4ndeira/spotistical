@@ -18,7 +18,7 @@
 #### Formato de dados processados:
 
 ```R
-> str(spotify)
+> str(spotify_processed)
 'data.frame':	2110316 obs. of  25 variables:
  $ spotify_id        : chr  "2RkZ5LkEzeHGRsmDqKwmaJ" "42UBPzRMh5yyz0EDPr6fr1" "0FTmksd2dxiE5e3rWyJXs6" ...
  $ name              : chr  "Ordinary" "Manchild" "back to friends" "Die With A Smile" ...

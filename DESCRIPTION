@@ -1,16 +1,31 @@
 Package: spotifyanalytics
 Type: Package
-Title: What the Package Does (Title Case)
-Version: 0.1.0
+Title: App projeto Intro a CIencia de Dados CIN 8000
+Version: 0.2.0
 Authors@R: c(
     person(
-      "Jane", "Doe",
-      email = "jane@example.com",
+      "Tulio", "Baars",
+      email = "tuliobaars@gmail.com",
       role = c("aut", "cre")
+    ),
+    person(
+      "Matheus", "Bandeira",
+      email = "@gmail.com",
+      role = c("aut", "ctb")
+    ),
+    person(
+      "Jorge", "Henrique",
+      email = "@gmail.com",
+      role = c("aut", "ctb")
+    ),
+    person(
+      "Arthur", "LR",
+      email = "@gmail.com",
+      role = c("ctb")
     )
   )
-Description: More about what it does (maybe more than one line).
-    Continuation lines should be indented.
-License: What license is it under?
+Description: Analise de dados do spotify coletados a nível de música com 2110316 entradas de 25 variáveis.
+License: MIT
 Encoding: UTF-8
 LazyData: true
+Config/roxygen2/version: 8.0.0

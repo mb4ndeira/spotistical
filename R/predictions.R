@@ -4,11 +4,13 @@
 
 # Install necessary packages if you don't have them
 # install.packages(c("tidyverse", "ranger", "caret", "vip"))
-
+library(Matrix)
 library(tidyverse)
 library(ranger)   # Fast implementation of Random Forests
 library(caret)    # For data partitioning
 library(vip)      # For visualizing variable importance
+library(dplyr)
+spotify_processed <- arrow::read_parquet("./data/spotify_processed.parquet")
 
 #' 1. Data Preparation & Sampling
 #' 2.1 Million rows is very large for local ML. We will sample it.

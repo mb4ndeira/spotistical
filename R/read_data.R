@@ -9,7 +9,8 @@
 #' @examples
 library(dplyr)
 library(arrow)
-
+library(Matrix)
+spotify_processed <- arrow::read_parquet("./data/spotify_processed.parquet")
 
 readData <- function(minis = FALSE, data = file.path("../data/")) {
   spotify_processed = arrow::read_parquet("./data/spotify_processed.parquet")
@@ -20,6 +21,8 @@ readData <- function(minis = FALSE, data = file.path("../data/")) {
     return(minis30) = read.csv(file = "./data/minis30.csv")
   }
 }
+
+readData()
 
 save_env_to_parquet <- function(output_dir = "env_parquet") {
   # 1. Ensure the arrow package is loaded

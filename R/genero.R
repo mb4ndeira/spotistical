@@ -1,5 +1,9 @@
 # Load visualization library
 library(ggplot2)
+library(magrittr)
+library(dplyr)
+library(Matrix)
+spotify_processed <-arrow::read_parquet("./data/spotify_processed.parquet")
 
 # 1. Build a Multiple Linear Regression Model
 # Predicting popularity based on danceability, energy, and valence (positivity)
