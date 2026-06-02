@@ -1,0 +1,37 @@
+services:
+  api:
+    container_name: spotify_api
+    build: ./api
+    restart: unless-stopped
+    ports:
+      - "${API_HOST_PORT:-8000}:8000"
+    environment:
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
+      TRACKS_PARQUET_PATH: /data/tracks.parquet
+    volumes:
+      - ./api:/app
+      - ./data:/data
+    develop:
+      watch:
+        - action: sync
+          path: ./api
+          target: /app
+
+  frontend:
+    container_name: spotify_frontend
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_HOST_PORT:-5173}:5173"
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+    develop:
+      watch:
+        - action: sync
+          path: ./frontend/src
+          target: /app/src
+
+volumes: {}

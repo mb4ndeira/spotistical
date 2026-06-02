@@ -3,3 +3,13 @@
 .RData
 .Ruserdata
 .positai
+
+*.
+!.env.example
+__pycache__/
+node_modules/
+dist/
+data/
+
+ROADMAP.md
+
