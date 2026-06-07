@@ -1,13 +1,47 @@
 services:
+
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: spotify_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:          ${POSTGRES_USER:-spotify}
+      POSTGRES_PASSWORD:      ${POSTGRES_PASSWORD:-spotify}
+      POSTGRES_DB:            ${POSTGRES_DB:-spotify}
+      POSTGRES_APP_USER:      ${POSTGRES_APP_USER:-spotify_app}
+      POSTGRES_APP_PASSWORD:  ${POSTGRES_APP_PASSWORD:-spotify_app}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+    ports:
+      - "${DB_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-spotify} -d ${POSTGRES_DB:-spotify}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   api:
     container_name: spotify_api
     build: ./api
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "${API_HOST_PORT:-8000}:8000"
     environment:
-      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
-      TRACKS_PARQUET_PATH: /data/tracks.parquet
+      ALPHA_VANTAGE_API_KEY:  ${ALPHA_VANTAGE_API_KEY:-}
+      TRACKS_PARQUET_PATH:    ${TRACKS_PARQUET_PATH:-/data/spotify_processed.parquet}
+      # Admin credentials — used only by ingest routes
+      POSTGRES_HOST:          db
+      POSTGRES_PORT:          5432
+      POSTGRES_USER:          ${POSTGRES_USER:-spotify}
+      POSTGRES_PASSWORD:      ${POSTGRES_PASSWORD:-spotify}
+      POSTGRES_DB:            ${POSTGRES_DB:-spotify}
+      # App credentials — read-only on source tables, used by all other routes
+      POSTGRES_APP_USER:      ${POSTGRES_APP_USER:-spotify_app}
+      POSTGRES_APP_PASSWORD:  ${POSTGRES_APP_PASSWORD:-spotify_app}
     volumes:
       - ./api:/app
       - ./data:/data
@@ -34,4 +68,5 @@ services:
           path: ./frontend/src
           target: /app/src
 
-volumes: {}
+volumes:
+  db_data:
