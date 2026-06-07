@@ -11,7 +11,7 @@ import httpx
 from drivers.db.db_driver import get_admin_pool
 from drivers.gdelt.gdelt_driver import THEMES, gdelt_driver
 
-_DELAY = float(os.environ.get("GDELT_REQUEST_DELAY", "1"))  # seconds between requests
+_DELAY = float(os.environ.get("GDELT_REQUEST_DELAY", "5"))  # GDELT: 1 req/5s documentado
 
 _INSERT = """
     INSERT INTO news_events (published_at, title, url, country, tone, source_lang, topics)
