@@ -13,3 +13,5 @@ data/
 
 ROADMAP.md
 
+.DS_Store
+.Rprofile
