@@ -9,6 +9,7 @@ from adapters.http.tracks_routes    import router as tracks_router
 from adapters.http.news_routes      import router as news_router
 from adapters.http.ingest_routes    import router as ingest_router
 from adapters.http.clustering_routes import router as clustering_router
+from adapters.http.lyrics_routes     import router as lyrics_router
 import drivers.db.db_driver as db_driver
 
 
@@ -40,6 +41,7 @@ app.include_router(tracks_router)
 app.include_router(news_router)
 app.include_router(ingest_router)
 app.include_router(clustering_router)
+app.include_router(lyrics_router)
 
 
 @app.get("/health")

@@ -117,7 +117,7 @@ async def _grant_app_user() -> None:
         # source tables — read only
         await conn.execute(f'GRANT SELECT ON tracks, news_events TO "{app_user}"')
         # derived tables — full read-write (pipeline owns these)
-        await conn.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON song_clusters, insights TO "{app_user}"')
+        await conn.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON song_clusters, insights, track_lyrics TO "{app_user}"')
         # sequences needed for INSERT on tables with bigserial PKs
         await conn.execute(f'GRANT USAGE, SELECT ON SEQUENCE insights_id_seq, news_events_id_seq TO "{app_user}"')
     print(f"[db] app user '{app_user}' grants refreshed")
