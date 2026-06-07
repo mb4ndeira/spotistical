@@ -4,7 +4,7 @@
 .Ruserdata
 .positai
 
-*.
+.*
 !.env.example
 __pycache__/
 node_modules/

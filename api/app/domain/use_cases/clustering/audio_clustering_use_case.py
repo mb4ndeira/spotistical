@@ -35,6 +35,7 @@ Progress is exposed via get_progress() → GET /clustering/audio/status.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import TypedDict, Optional
 
 import numpy as np
@@ -71,6 +72,7 @@ BATCH_SIZE = 2_000
 class ClusteringProgress(TypedDict):
     running:            bool
     stage:              str          # idle | loading_countries | clustering | global_pass | done | error
+    run_id:             Optional[str]
     country_current:    Optional[str]
     countries_done:     int
     countries_total:    int
@@ -85,6 +87,7 @@ class ClusteringProgress(TypedDict):
 _progress: ClusteringProgress = {
     "running":           False,
     "stage":             "idle",
+    "run_id":            None,
     "country_current":   None,
     "countries_done":    0,
     "countries_total":   0,
@@ -111,14 +114,16 @@ class AudioClusteringUseCase:
 
     async def execute(self, include_global: bool = False) -> dict:
         """Entry point — call from a BackgroundTask."""
+        run_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         _set(
-            running=True, stage="loading_countries",
+            running=True, stage="loading_countries", run_id=run_id,
             country_current=None, countries_done=0, countries_total=0,
             countries_skipped=0, k_current=None, k_best_this=None,
             tracks_this=0, tracks_persisted=0, last_error=None,
         )
+        print(f"[clustering/audio] run_id={run_id}")
         try:
-            return await self._pipeline(include_global)
+            return await self._pipeline(include_global, run_id)
         except Exception as exc:
             _set(stage="error", last_error=str(exc))
             print(f"[clustering/audio] ERROR: {exc}")
@@ -128,7 +133,7 @@ class AudioClusteringUseCase:
 
     # ── private ────────────────────────────────────────────────────────────────
 
-    async def _pipeline(self, include_global: bool) -> dict:
+    async def _pipeline(self, include_global: bool, run_id: str) -> dict:
 
         pool = db_driver.get_admin_pool()
 
@@ -168,8 +173,8 @@ class AudioClusteringUseCase:
                 None, _cpu_work, spotify_ids, X_raw, K_MIN_C, K_MAX_C
             )
 
-            # 4. persist
-            n = await self._persist(cpu_result, country, pool)
+            # 4. persist (with this run's run_id)
+            n = await self._persist(cpu_result, country, run_id, pool)
             total_persisted += n
 
             done = _progress["countries_done"] + 1
@@ -191,10 +196,15 @@ class AudioClusteringUseCase:
                 cpu_result = await loop.run_in_executor(
                     None, _cpu_work, spotify_ids, X_raw, K_MIN_GL, K_MAX_GL
                 )
-                n = await self._persist(cpu_result, "GL", pool)
+                n = await self._persist(cpu_result, "GL", run_id, pool)
                 total_persisted += n
 
+        # 6. invalidate insights from previous clustering runs
+        #    (cluster IDs renumber — old insights would reference wrong clusters)
+        await self._invalidate_stale_insights(run_id, pool)
+
         summary = {
+            "run_id":              run_id,
             "countries_clustered": _progress["countries_done"],
             "countries_skipped":   skipped,
             "tracks_persisted":    total_persisted,
@@ -226,27 +236,56 @@ class AudioClusteringUseCase:
                 HAVING {not_null}
             """)
 
-    async def _persist(self, result: dict, country: str, pool) -> int:
+    async def _persist(self, result: dict, country: str, run_id: str, pool) -> int:
         rows = [
-            (sid, country, int(lbl), float(x), float(y))
+            (sid, country, int(lbl), float(x), float(y), run_id)
             for sid, lbl, x, y in zip(
                 result["spotify_ids"], result["labels"],
                 result["umap_x"],      result["umap_y"],
             )
         ]
+        # clustering_run_id always updated — cluster IDs only compare within same run_id
         sql = """
             INSERT INTO song_clusters
-                (spotify_id, country, audio_cluster_id, umap_audio_x, umap_audio_y)
-            VALUES ($1, $2, $3, $4, $5)
+                (spotify_id, country, audio_cluster_id, umap_audio_x, umap_audio_y,
+                 clustering_run_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (spotify_id, country) DO UPDATE SET
-                audio_cluster_id = EXCLUDED.audio_cluster_id,
-                umap_audio_x     = EXCLUDED.umap_audio_x,
-                umap_audio_y     = EXCLUDED.umap_audio_y
+                audio_cluster_id  = EXCLUDED.audio_cluster_id,
+                umap_audio_x      = EXCLUDED.umap_audio_x,
+                umap_audio_y      = EXCLUDED.umap_audio_y,
+                clustering_run_id = EXCLUDED.clustering_run_id
         """
         async with pool.acquire() as conn:
             for i in range(0, len(rows), BATCH_SIZE):
                 await conn.executemany(sql, rows[i : i + BATCH_SIZE])
         return len(rows)
+
+    async def _invalidate_stale_insights(self, run_id: str, pool) -> None:
+        """
+        Deletes insights computed against a different clustering run.
+
+        K-Means cluster IDs have no stable meaning between runs — cluster 3
+        in run A and cluster 3 in run B are completely different groups.
+        Any insight that references a cluster from a previous run is semantically
+        wrong and must be recomputed.
+
+        This runs automatically at the end of every clustering pipeline so the
+        DB never silently holds mismatched data.
+        """
+        async with pool.acquire() as conn:
+            deleted = await conn.fetchval("""
+                WITH del AS (
+                    DELETE FROM insights
+                    WHERE  clustering_run_id IS NOT NULL
+                      AND  clustering_run_id != $1
+                    RETURNING 1
+                )
+                SELECT count(*) FROM del
+            """, run_id)
+        if deleted:
+            print(f"[clustering/audio] invalidated {deleted} stale insights "
+                  f"(clustering_run_id != {run_id})")
 
 
 # ── CPU work (runs in ThreadPoolExecutor) ──────────────────────────────────────

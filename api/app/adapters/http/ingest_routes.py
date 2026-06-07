@@ -53,11 +53,11 @@ async def ingest_news(
     date_from: date = Query(..., description="Start date YYYY-MM-DD"),
     date_to:   date = Query(..., description="End date   YYYY-MM-DD"),
 ):
-    """Backfill news_events from Alpha Vantage NEWS_SENTIMENT API.
+    """Backfill news_events from GDELT DOC API 2.0.
 
     Incremental — skips dates already in the DB.
     Safe to re-run (ON CONFLICT (url) DO NOTHING).
-    Free-tier throttle: ~1 req/13s (AV_REQUEST_DELAY env to override).
+    No API key required (GDELT is open). GDELT_REQUEST_DELAY env to override delay (default 1s).
     Source table — no modifications allowed after just lock-sources is run.
     """
     global _news_running
