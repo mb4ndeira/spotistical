@@ -11,7 +11,7 @@ library(broom)
 
 #' 1. Aggregate Spotify to Daily Global Baselines
 #' @param spotify_df The massive 2.1M row dataframe
-aggregate_daily_spotify <- function(spotify_df) {
+aggregate_daily_spotify <- function(spotify_df = spotify_processed) {
   cat("Calculating daily global audio baselines...\n")
 
   daily_baseline <- spotify_df %>%
@@ -33,22 +33,23 @@ aggregate_daily_spotify <- function(spotify_df) {
 #' we need to pinpoint the EXACT day the event broke.
 #' @param news_df The appended all_news_3y dataframe
 #' @param keyword The event keyword to look for
-find_peak_event_days <- function(news_df, keyword, min_articles = 5) {
-
+find_peak_event_days <- function(news_df = guardian, keyword = "Brazil", min_articles = 5) {
+  total_articles = 8
   # Filter news for the keyword and find days with abnormal spikes in coverage
   peak_days <- news_df %>%
-    # Assuming you want to search the titles/themes for the keyword
-    filter(str_detect(tolower(titulos_do_dia), tolower(keyword)) |
-             str_detect(tolower(temas_do_dia), tolower(keyword))) %>%
-    # Filter for major spikes (you can adjust the threshold)
+    filter(str_detect(tolower(titulo), tolower(keyword)) |
+             str_detect(tolower(tema), tolower(keyword))) %>%
+    # Only keep days with significant coverage
     filter(total_articles >= min_articles) %>%
+    # STEP 1: Sort globally from highest articles to lowest
     arrange(desc(total_articles)) %>%
-    # Prevent overlapping windows by keeping only the biggest day per month for that event
+    # STEP 2: Create the month grouping
     mutate(month_year = floor_date(data, "month")) %>%
     group_by(month_year) %>%
-    slice_max(order_by = total_articles, n = 1) %>%
+    # STEP 3: Grab the 1st row of each group (which is guaranteed to be the max due to the sort above)
+    slice(1) %>%
     ungroup() %>%
-    select(data, total_articles, titulos_do_dia)
+    select(data, total_articles, titulo)
 
   return(peak_days)
 }
@@ -110,12 +111,33 @@ analyze_event_window <- function(event_date, daily_spotify, window = 7) {
   return(final_result)
 }
 
+terms_to_analyze <- c("earthquake",
+                      "attack",
+                      "war",
+                      "Lula",
+                      "Bolsonaro",
+                      "election",
+                      "oscar",
+                      "louvre",
+                      "COP",
+                      "olympics",
+                      "Madonna",
+                      "amy winehouse",
+                      "bob marley",
+                      "Diddy",
+                      "6ix9ine",
+                      "tornado",
+                      "hurricane",
+                      "tsunami",
+                      "cyclone",
+                      "storm","snowstorm")
+my_search_terms <- terms_to_analyze
 #' 4. The Master Execution Pipeline
 #' Loops through your list of search terms and builds the final impact report.
 #' @param spotify_raw The 2.1M row dataframe
 #' @param news_raw The appended 3-year news dataframe
 #' @param terms_to_analyze Vector of keywords
-run_global_event_study <- function(spotify_raw, news_raw, terms_to_analyze) {
+run_global_event_study <- function(spotify_raw = spotify_processed, news_raw = guardian, terms_to_analyze) {
 
   # 1. Prep the Spotify data
   daily_spotify <- aggregate_daily_spotify(spotify_raw)
@@ -137,7 +159,7 @@ run_global_event_study <- function(spotify_raw, news_raw, terms_to_analyze) {
     # 3. Analyze the music shifts around each of those peak days
     for(i in 1:nrow(peak_events)) {
       event_date <- peak_events$data[i]
-      headline <- peak_events$titulos_do_dia[i]
+      headline <- peak_events$titulo[i]
 
       impact <- analyze_event_window(event_date, daily_spotify, window = 7)
 
@@ -147,7 +169,7 @@ run_global_event_study <- function(spotify_raw, news_raw, terms_to_analyze) {
             event_type = term,
             headline = headline
           )
-        all_impact_results[[paste(term, event_date, sep="_")]] <- impact
+        all_impact_results[[paste(term, event_date, sep="-")]] <- impact
       }
     }
   }
@@ -171,7 +193,7 @@ library(stringr)
 #' @param news_df The appended all_news_3y dataframe
 #' @param top_n How many distinct topics/events to analyze
 #' @return A character vector of the top specific topics
-extract_dynamic_topics <- function(news_df, top_n = 20) {
+extract_dynamic_topics <- function(news_df = guardian, top_n = 100) {
   cat("Scanning 3 years of news to identify the biggest global topics...\n")
 
   # List of generic Guardian sections to ignore so we get specific events
@@ -186,10 +208,10 @@ extract_dynamic_topics <- function(news_df, top_n = 20) {
   top_topics <- news_df %>%
     # 1. Split the massive strings of themes into individual rows
     # Your aggregated data uses "|" for new articles and ";" for tags within articles
-    separate_rows(temas_do_dia, sep = "[;|]") %>%
+    separate_rows(tema, sep = "[;|]") %>%
 
     # 2. Clean up the text
-    mutate(topic = str_squish(tolower(temas_do_dia))) %>%
+    mutate(topic = str_squish(tolower(tema))) %>%
 
     # 3. Filter out empty strings and generic news categories
     filter(str_length(topic) > 2) %>%
@@ -215,13 +237,13 @@ extract_dynamic_topics <- function(news_df, top_n = 20) {
 # =====================================================================
 
 # 1. Automatically extract the top 20 biggest specific themes/events from the news
-dynamic_search_terms <- extract_dynamic_topics(all_news_3y, top_n = 20)
+dynamic_search_terms <- extract_dynamic_topics(guardian, top_n = 100)
 
 # 2. Run the Event Study using those automatically generated terms
 final_event_impact_report <- run_global_event_study(
   spotify_raw = spotify_processed,
-  news_raw = all_news_3y,
-  terms_to_analyze = dynamic_search_terms
+  news_raw = guardian,
+  terms_to_analyze = terms_to_analyze
 )
 
 # 3. View the statistically significant behavioral shifts!
@@ -229,8 +251,9 @@ significant_shifts <- final_event_impact_report %>% filter(is_significant == TRU
 View(significant_shifts)
 
 # RUN THE ANALYSIS
-# final_event_impact_report <- run_global_event_study(spotify_processed, all_news_3y, my_search_terms)
+final_event_impact_report <- run_global_event_study(spotify_processed, guardian, my_search_terms)
 
 # View the shifts that were actually statistically significant!
-# significant_shifts <- final_event_impact_report %>% filter(is_significant == TRUE)
-# View(significant_shifts)
+significant_shifts <- final_event_impact_report %>% filter(is_significant == TRUE)
+View(significant_shifts)
+
