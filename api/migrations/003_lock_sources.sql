@@ -40,29 +40,22 @@ CREATE TRIGGER news_events_readonly
     FOR EACH ROW EXECUTE FUNCTION prevent_source_modification();
 
 -- ── 3. App-user permissions ───────────────────────────────────────
--- (No-op if POSTGRES_APP_USER was not created; the DO block is safe.)
+-- Only revoke write access on source tables from the app user.
+-- Read grants on all tables are applied automatically on every API
+-- startup via db_driver._grant_app_user() — no need to duplicate here.
 
 DO $$
 DECLARE
     app TEXT := current_setting('spotistical.app_user', true);
 BEGIN
     IF app IS NULL OR app = '' THEN
-        RAISE NOTICE 'spotistical.app_user not set — skipping GRANT/REVOKE';
+        RAISE NOTICE 'spotistical.app_user not set — skipping REVOKE';
         RETURN;
     END IF;
 
-    -- Source tables: SELECT only
-    EXECUTE format('GRANT  SELECT                          ON tracks       TO %I', app);
-    EXECUTE format('REVOKE INSERT, UPDATE, DELETE          ON tracks       FROM %I', app);
-    EXECUTE format('GRANT  SELECT                          ON news_events  TO %I', app);
-    EXECUTE format('REVOKE INSERT, UPDATE, DELETE          ON news_events  FROM %I', app);
+    EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON tracks      FROM %I', app);
+    EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON news_events FROM %I', app);
 
-    -- Derived tables: full read-write
-    EXECUTE format('GRANT  SELECT, INSERT, UPDATE, DELETE  ON song_clusters TO %I', app);
-    EXECUTE format('GRANT  SELECT, INSERT, UPDATE, DELETE  ON insights       TO %I', app);
-    EXECUTE format('GRANT  USAGE, SELECT ON SEQUENCE insights_id_seq         TO %I', app);
-    EXECUTE format('GRANT  USAGE, SELECT ON SEQUENCE news_events_id_seq      TO %I', app);
-
-    RAISE NOTICE 'Permissions applied for app user: %', app;
+    RAISE NOTICE 'Source table writes revoked for app user: %', app;
 END;
 $$;

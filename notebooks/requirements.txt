@@ -1,0 +1,24 @@
+# Notebook environment — install with: pip install -r requirements.txt
+# (or: just notebooks — auto-installs before launching Jupyter Lab)
+
+# Jupyter
+jupyterlab==4.2.5
+ipywidgets==8.1.5
+
+# Data + viz
+pandas==2.2.3
+numpy==1.26.4
+matplotlib==3.9.2
+seaborn==0.13.2
+plotly==5.24.1
+
+# DB (sync access from notebooks)
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.36
+
+# ML (same versions as API)
+scikit-learn==1.5.2
+umap-learn==0.5.6
+
+# Env
+python-dotenv==1.0.1

@@ -5,9 +5,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from adapters.http.tracks_routes import router as tracks_router
-from adapters.http.news_routes   import router as news_router
-from adapters.http.ingest_routes import router as ingest_router
+from adapters.http.tracks_routes    import router as tracks_router
+from adapters.http.news_routes      import router as news_router
+from adapters.http.ingest_routes    import router as ingest_router
+from adapters.http.clustering_routes import router as clustering_router
 import drivers.db.db_driver as db_driver
 
 
@@ -38,6 +39,7 @@ app.add_middleware(
 app.include_router(tracks_router)
 app.include_router(news_router)
 app.include_router(ingest_router)
+app.include_router(clustering_router)
 
 
 @app.get("/health")

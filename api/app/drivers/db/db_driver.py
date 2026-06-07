@@ -61,6 +61,7 @@ async def init() -> None:
         _app_pool = _admin_pool
 
     await _run_migrations()
+    await _grant_app_user()
 
 
 async def close() -> None:
@@ -98,6 +99,28 @@ async def lock_source_tables() -> None:
         await conn.execute(f"SET LOCAL spotistical.app_user = '{app_user}'")
         await conn.execute(sql)
     print(f"[db] source tables locked — app user '{app_user}' is now read-only on tracks + news_events")
+
+
+async def _grant_app_user() -> None:
+    """Grant the app user read access to source tables and read-write to derived tables.
+
+    Runs on every startup — idempotent (GRANT is a no-op if already granted).
+    Derived tables (song_clusters, insights) must be readable by the app user
+    so notebooks and API routes can query them without admin credentials.
+    Source table write protection is a separate concern handled by 003_lock_sources.sql.
+    """
+    app_user = os.environ.get("POSTGRES_APP_USER")
+    if not app_user:
+        return
+    pool = get_admin_pool()
+    async with pool.acquire() as conn:
+        # source tables — read only
+        await conn.execute(f'GRANT SELECT ON tracks, news_events TO "{app_user}"')
+        # derived tables — full read-write (pipeline owns these)
+        await conn.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON song_clusters, insights TO "{app_user}"')
+        # sequences needed for INSERT on tables with bigserial PKs
+        await conn.execute(f'GRANT USAGE, SELECT ON SEQUENCE insights_id_seq, news_events_id_seq TO "{app_user}"')
+    print(f"[db] app user '{app_user}' grants refreshed")
 
 
 async def _run_migrations() -> None:

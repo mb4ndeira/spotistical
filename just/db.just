@@ -1,15 +1,13 @@
 # ── Database ───────────────────────────────────────────────────────────────────
 
-# Default DB connection vars (overridden by .env)
 pg_user := env_var_or_default("POSTGRES_USER", "spotify")
-pg_pass := env_var_or_default("POSTGRES_PASSWORD", "spotify")
-pg_db   := env_var_or_default("POSTGRES_DB", "spotistical")
+pg_db   := env_var_or_default("POSTGRES_DB",   "spotify")
 
-# Open an interactive psql session inside the DB container
+# Interactive psql session inside the DB container
 psql:
     {{ compose }} exec db psql -U {{ pg_user }} -d {{ pg_db }}
 
-# Apply migrations manually (normally run automatically by the API on startup)
+# Apply all migrations manually (the API does this automatically on startup)
 migrate:
     #!/bin/bash
     for f in {{ justfile_directory() }}/api/migrations/*.sql; do
@@ -17,69 +15,44 @@ migrate:
         {{ compose }} exec -T db psql -U {{ pg_user }} -d {{ pg_db }} < "$f"
     done
 
-# Quick row counts for all main tables
+# Row counts for all main tables
 db-stats:
-    {{ compose }} exec db psql -U {{ pg_user }} -d {{ pg_db }} -x \
-        -c "SELECT 'tracks'        AS \"table\", count(*)::text AS rows FROM tracks        UNION ALL \
-            SELECT 'news_events'   AS \"table\", count(*)::text AS rows FROM news_events   UNION ALL \
-            SELECT 'song_clusters' AS \"table\", count(*)::text AS rows FROM song_clusters UNION ALL \
-            SELECT 'insights'      AS \"table\", count(*)::text AS rows FROM insights"
+    {{ compose }} exec db psql -U {{ pg_user }} -d {{ pg_db }} -x -c \
+        "SELECT 'tracks'        AS \"table\", count(*)::text AS rows FROM tracks        UNION ALL \
+         SELECT 'news_events',               count(*)::text         FROM news_events   UNION ALL \
+         SELECT 'song_clusters',             count(*)::text         FROM song_clusters UNION ALL \
+         SELECT 'insights',                  count(*)::text         FROM insights"
 
-# Hypertable chunk info
+# TimescaleDB hypertable chunk info
 db-chunks:
-    {{ compose }} exec db psql -U {{ pg_user }} -d {{ pg_db }} \
-        -c "SELECT hypertable_name, chunk_name, range_start::date, range_end::date, \
-                   pg_size_pretty(total_bytes) AS size \
-            FROM   timescaledb_information.chunks \
-            ORDER  BY hypertable_name, range_start"
+    {{ compose }} exec db psql -U {{ pg_user }} -d {{ pg_db }} -c \
+        "SELECT hypertable_name, chunk_name, range_start::date, range_end::date, \
+                pg_size_pretty(total_bytes) AS size \
+         FROM   timescaledb_information.chunks \
+         ORDER  BY hypertable_name, range_start"
 
-# Drop and recreate the entire schema — destructive, wipes all data
+# Drop all tables — destructive, requires API restart to re-apply migrations
 db-reset:
     #!/bin/bash
-    echo "WARNING: this drops all tables and re-runs migrations. Ctrl-C to abort."
+    echo "WARNING: drops all tables and wipes all data. Ctrl-C to abort."
     sleep 4
     {{ compose }} exec -T db psql -U {{ pg_user }} -d {{ pg_db }} \
         -c "DROP TABLE IF EXISTS insights, song_clusters, news_events, tracks CASCADE"
-    echo "Tables dropped. Restart the API to re-apply migrations:"
-    echo "  just restart-svc api"
+    echo "Done. Restart the API to re-apply migrations: just restart-svc api"
 
-# ── Ingest ─────────────────────────────────────────────────────────────────────
+# ── Notebooks ──────────────────────────────────────────────────────────────────
 
-# Trigger the parquet → TimescaleDB ingest (runs in background, watch logs)
-ingest:
+# Launch Jupyter Lab (auto-installs deps if missing)
+notebooks:
     #!/bin/bash
-    echo "Triggering ingest…"
-    curl -s -X POST http://localhost:${API_HOST_PORT:-8000}/ingest/tracks | python3 -m json.tool
-    echo ""
-    echo "Watch progress with: just logs-svc api"
-
-# Poll ingest status
-ingest-status:
-    curl -s http://localhost:${API_HOST_PORT:-8000}/ingest/tracks/status | python3 -m json.tool
-
-# Lock source tables (run once after ingest + backfill are both complete)
-lock-sources:
-    #!/bin/bash
-    echo "Locking source tables…"
-    curl -s -X POST http://localhost:${API_HOST_PORT:-8000}/ingest/lock-sources | python3 -m json.tool
-
-# Backfill Alpha Vantage news: just backfill-news 2023-10-18 2025-06-11
-backfill-news date_from date_to:
-    #!/bin/bash
-    echo "Starting news backfill {{ date_from }} → {{ date_to }}…"
-    curl -s -X POST \
-        "http://localhost:${API_HOST_PORT:-8000}/ingest/news?date_from={{ date_from }}&date_to={{ date_to }}" \
-        | python3 -m json.tool
-    echo ""
-    echo "Watch progress with: just logs-svc api"
-
-# Live progress + DB coverage: weeks done, articles in DB, date range covered
-backfill-news-status:
-    curl -s http://localhost:${API_HOST_PORT:-8000}/ingest/news/status \
-        | python3 {{ justfile_directory() }}/scripts/news_status.py
+    cd {{ justfile_directory() }}/notebooks
+    if ! python3 -c "import jupyter" 2>/dev/null; then
+        pip install -r requirements.txt -q
+    fi
+    jupyter lab --port 8888 --no-browser
 
 # ── Health ─────────────────────────────────────────────────────────────────────
 
-# Check API health (includes DB connectivity)
+# API health check (includes DB connectivity status)
 health:
     curl -s http://localhost:${API_HOST_PORT:-8000}/health | python3 -m json.tool
