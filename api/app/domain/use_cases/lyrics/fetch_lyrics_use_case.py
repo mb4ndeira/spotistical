@@ -33,8 +33,8 @@ import httpx
 import drivers.db.db_driver as db_driver
 from drivers.lyrics.lyrics_driver import fetch_lyrics
 
-CONCURRENCY   = int(os.environ.get("LYRICS_CONCURRENCY",    "5"))
-BATCH_SIZE    = int(os.environ.get("LYRICS_BATCH_SIZE",    "100"))
+CONCURRENCY   = int(os.environ.get("LYRICS_CONCURRENCY",   "15"))
+BATCH_SIZE    = int(os.environ.get("LYRICS_BATCH_SIZE",   "100"))
 
 
 # ── progress ──────────────────────────────────────────────────────────────────
@@ -121,14 +121,18 @@ class FetchLyricsUseCase:
 
         # 2. find already-processed tracks
         async with pool.acquire() as conn:
-            done_rows = await conn.fetch("SELECT spotify_id, failed FROM track_lyrics")
-        done = {r["spotify_id"]: r["failed"] for r in done_rows}
+            done_rows = await conn.fetch("SELECT spotify_id, failed, fail_reason FROM track_lyrics")
+        done = {r["spotify_id"]: (r["failed"], r["fail_reason"]) for r in done_rows}
 
         to_fetch, skipped = [], 0
         for r in rows:
             sid = r["spotify_id"]
             if sid in done:
-                if done[sid] and retry_failed:
+                failed, reason = done[sid]
+                # connection_failed sempre retenta — é erro de rede, não da música
+                if failed and reason == "connection_failed":
+                    to_fetch.append(r)
+                elif failed and retry_failed:
                     to_fetch.append(r)
                 else:
                     skipped += 1
@@ -160,8 +164,8 @@ class FetchLyricsUseCase:
                 name    = row["name"]    or ""
                 artists = row["artists"] or ""
 
-                lyrics, fail_reason = await fetch_lyrics(client, artists, name)
-                record = (sid, lyrics, None, "lyrics.ovh", lyrics is None, fail_reason)
+                lyrics, source, fail_reason = await fetch_lyrics(client, artists, name)
+                record = (sid, lyrics, None, source or "none", lyrics is None, fail_reason)
 
                 async with lock:
                     results.append(record)

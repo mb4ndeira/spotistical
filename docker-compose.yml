@@ -31,7 +31,9 @@ services:
     ports:
       - "${API_HOST_PORT:-8000}:8000"
     environment:
-      ALPHA_VANTAGE_API_KEY:  ${ALPHA_VANTAGE_API_KEY:-}
+      GUARDIAN_API_KEY:       ${GUARDIAN_API_KEY:-}
+      GDELT_REQUEST_DELAY:    ${GDELT_REQUEST_DELAY:-6}
+      GUARDIAN_REQUEST_DELAY: ${GUARDIAN_REQUEST_DELAY:-0.5}
       TRACKS_PARQUET_PATH:    ${TRACKS_PARQUET_PATH:-/data/spotify_processed.parquet}
       # Admin credentials — used only by ingest routes
       POSTGRES_HOST:          db

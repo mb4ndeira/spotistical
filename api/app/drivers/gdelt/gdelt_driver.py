@@ -112,6 +112,7 @@ class GdeltDriver:
     Rate limit documentado: 1 request a cada 5 segundos.
     Retorna até 250 artigos por request.
     Usa sort=ToneDesc para garantir que o campo `tone` venha na resposta.
+    Fonte secundária — 429s são retentados com backoff, nunca pulados.
     """
 
     async def fetch_articles(
@@ -122,34 +123,60 @@ class GdeltDriver:
         query: str,
         client: httpx.AsyncClient,
         max_records: int = 250,
+        max_retries: int = 4,
     ) -> list[dict[str, Any]]:
+        import asyncio, random
+        from datetime import datetime
+
         params = {
             "query":         query,
             "mode":          "ArtList",
             "maxrecords":    str(max_records),
             "format":        "json",
-            "sort":          "ToneDesc",   # força o campo tone na resposta
+            "sort":          "ToneDesc",
             "startdatetime": date_from.strftime("%Y%m%d") + "000000",
             "enddatetime":   date_to.strftime("%Y%m%d") + "235959",
         }
 
         logger.info("GdeltDriver: %s  %s → %s", query[:40], date_from, date_to)
 
-        resp = await client.get(_BASE_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
+        for attempt in range(max_retries + 1):
+            try:
+                resp = await client.get(_BASE_URL, params=params, timeout=20)
+
+                if resp.status_code == 429:
+                    wait = (2 ** attempt) * 15 + random.uniform(0, 5)  # 15s, 30s, 60s, 120s + jitter
+                    logger.warning("GdeltDriver: 429 — aguardando %.0fs (tentativa %d/%d)", wait, attempt + 1, max_retries + 1)
+                    await asyncio.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                data = resp.json()
+                break
+
+            except httpx.TimeoutException:
+                if attempt < max_retries:
+                    await asyncio.sleep(10)
+                    continue
+                logger.warning("GdeltDriver: timeout após %d tentativas", max_retries + 1)
+                return []
+            except Exception as exc:
+                logger.warning("GdeltDriver: erro — %s", exc)
+                return []
+        else:
+            logger.warning("GdeltDriver: esgotou retries para %s %s→%s", query[:30], date_from, date_to)
+            return []
 
         results = []
         for a in (data.get("articles") or []):
             seendate = a.get("seendate", "")
             try:
-                from datetime import datetime
                 pub = datetime.strptime(seendate, "%Y%m%dT%H%M%SZ")
             except (ValueError, TypeError):
                 continue
 
-            fips    = (a.get("sourcecountry") or "")[:2] or None
-            iso     = FIPS_TO_ISO.get(fips) if fips else None
+            fips     = (a.get("sourcecountry") or "")[:2] or None
+            iso      = FIPS_TO_ISO.get(fips) if fips else None
             raw_tone = a.get("tone")
             try:
                 tone = float(raw_tone) if raw_tone is not None else None
@@ -163,6 +190,7 @@ class GdeltDriver:
                 "country":      iso,
                 "tone":         tone,
                 "source_lang":  a.get("language") or None,
+                "source":       "gdelt",
             })
 
         logger.info("GdeltDriver: %d artigos recebidos", len(results))

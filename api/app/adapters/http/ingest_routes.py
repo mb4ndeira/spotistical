@@ -47,18 +47,26 @@ async def tracks_status():
 
 # ── News ──────────────────────────────────────────────────────────
 
+_VALID_SOURCES = {"gdelt_bulk", "guardian"}
+
+
 @router.post("/news")
 async def ingest_news(
     background_tasks: BackgroundTasks,
-    date_from: date = Query(..., description="Start date YYYY-MM-DD"),
-    date_to:   date = Query(..., description="End date   YYYY-MM-DD"),
+    date_from:             date      = Query(...,  description="Start date YYYY-MM-DD"),
+    date_to:               date      = Query(...,  description="End date   YYYY-MM-DD"),
+    sources:               list[str] = Query(default=["gdelt_bulk"],
+                                             description="Fontes: gdelt_bulk (padrão), guardian (opcional)"),
+    guardian_daily_limit:  int       = Query(default=490,
+                                             description="Máx. requests Guardian por dia (teto free tier: 500)"),
 ):
-    """Backfill news_events from GDELT DOC API 2.0.
+    """Backfill news_events via fontes configuráveis.
 
-    Incremental — skips dates already in the DB.
+    - **gdelt_bulk** (primário, padrão): arquivos GKG brutos, sem rate limit, multilingual, tone nativo.
+    - **guardian** (secundário, padrão): inglês, alta qualidade, 500 req/dia. Requer GUARDIAN_API_KEY.
+
+    Incremental — semanas com gdelt_bulk já no banco são puladas.
     Safe to re-run (ON CONFLICT (url) DO NOTHING).
-    No API key required (GDELT is open). GDELT_REQUEST_DELAY env to override delay (default 1s).
-    Source table — no modifications allowed after just lock-sources is run.
     """
     global _news_running
     if _news_running:
@@ -66,11 +74,21 @@ async def ingest_news(
     if date_from > date_to:
         raise HTTPException(400, "date_from must be <= date_to")
 
+    invalid = set(sources) - _VALID_SOURCES
+    if invalid:
+        raise HTTPException(400, f"Fontes inválidas: {sorted(invalid)}. Válidas: {sorted(_VALID_SOURCES)}")
+
+    active = set(sources)
+
     async def _run():
         global _news_running
         _news_running = True
         try:
-            result = await ingest_news_uc.execute(date_from, date_to)
+            result = await ingest_news_uc.execute(
+                date_from, date_to,
+                sources=active,
+                guardian_daily_limit=guardian_daily_limit,
+            )
             print(f"[ingest/news] complete — {result}")
         finally:
             _news_running = False
@@ -78,6 +96,7 @@ async def ingest_news(
     background_tasks.add_task(_run)
     return {
         "success": True,
+        "sources": sorted(active),
         "message": f"News backfill started ({date_from} → {date_to}) — watch logs with: just logs-svc api",
     }
 
