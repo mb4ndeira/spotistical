@@ -11,8 +11,8 @@ router = APIRouter(prefix="/news", tags=["news"])
 
 @router.get("/")
 def list_news(
-    time_from: str | None = Query(None, description="ISO datetime: 2023-10-01T00:00:00"),
-    time_to:   str | None = Query(None, description="ISO datetime: 2023-12-31T23:59:59"),
+    time_from: str | None = Query(None, description="ISO datetime: 2023-10-18T00:00:00"),
+    time_to:   str | None = Query(None, description="ISO datetime: 2025-06-11T23:59:59"),
     country:   str | None = Query(None, description="Código ISO 2 letras: BR, CL, US..."),
     limit:     int        = Query(50, le=1000),
 ):

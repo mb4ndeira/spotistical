@@ -145,19 +145,14 @@ class IngestNewsUseCase:
         pool  = get_admin_pool()
         weeks = _weeks_in_range(date_from, date_to)
 
-        # semana coberta = GDELT bulk já passou por ela (quando gdelt_bulk ativo)
-        if "gdelt_bulk" in active_sources:
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """SELECT DISTINCT date_trunc('week', published_at)::date AS w
-                       FROM news_events
-                       WHERE published_at::date BETWEEN $1 AND $2
-                         AND source = 'gdelt_bulk'""",
-                    date_from, date_to,
-                )
-            covered_weeks = {r["w"] for r in rows}
-        else:
-            covered_weeks = set()
+        # semana coberta = registrada em news_ingested_weeks (completa + curada)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT week_start FROM news_ingested_weeks
+                   WHERE week_start BETWEEN $1 AND $2""",
+                date_from, date_to,
+            )
+        covered_weeks = {r["week_start"] for r in rows}
 
         guardian_req_counter: list[int] = [0]
 
@@ -242,9 +237,16 @@ class IngestNewsUseCase:
 
         Cada dia recebe floor(200 * day_count / week_count) slots — proporcional ao volume.
         Dentro de cada dia a seleção é aleatória (ORDER BY random()).
-        Artigos sem country são descartados integralmente (não há como associar ao Spotify).
+        Artigos sem country são descartados integralmente.
+        Após curadoria registra a semana em news_ingested_weeks — só então ela é
+        considerada "coberta" e pulada em runs futuros.
         """
         async with pool.acquire() as conn:
+            before = await conn.fetchval(
+                "SELECT count(*) FROM news_events WHERE published_at::date BETWEEN $1 AND $2",
+                week, w_end,
+            )
+
             result = await conn.execute("""
                 DELETE FROM news_events
                 WHERE published_at::date BETWEEN $1 AND $2
@@ -271,13 +273,25 @@ class IngestNewsUseCase:
 
                     UNION ALL
 
-                    -- artigos sem país: descarta todos
                     SELECT id FROM news_events
                     WHERE published_at::date BETWEEN $1 AND $2
                       AND country IS NULL
                   )
             """, week, w_end, max_per_group)
-        # result é string "DELETE N"
+
+            after = await conn.fetchval(
+                "SELECT count(*) FROM news_events WHERE published_at::date BETWEEN $1 AND $2",
+                week, w_end,
+            )
+
+            # marca semana como concluída — runs futuros vão pular
+            await conn.execute("""
+                INSERT INTO news_ingested_weeks
+                    (week_start, articles_before_curation, articles_after_curation)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (week_start) DO NOTHING
+            """, week, before, after)
+
         try:
             return int(result.split()[-1])
         except (ValueError, IndexError):

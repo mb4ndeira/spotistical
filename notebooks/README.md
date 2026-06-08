@@ -51,7 +51,7 @@ Ver detalhes em `ROADMAP.md → Run isolation`.
 
 A fonte de notícias é o **GDELT DOC API 2.0** (gratuito, sem API key, sem limite publicado de requests). GDELT indexa notícias em 65+ idiomas de 100+ países, o que significa que artigos chegam na língua original da fonte.
 
-**Consequência no BERTopic:** o `CountVectorizer` usa `stop_words='english'` porque o corpus coletado até agora (out–dez/2023, queries temáticas globais) retornou predominantemente artigos em inglês. Isso pode mudar com o corpus maior.
+**Consequência no BERTopic:** o `CountVectorizer` usa `stop_words='english'` porque o corpus coletado até agora (out/2023–jun/2025, queries temáticas globais) retornou predominantemente artigos em inglês. Isso pode mudar com o corpus multilingual.
 
 **O código está preparado para a transição.** Cada run BERTopic grava um campo `config` em `news_topic_definitions` com os parâmetros usados:
 

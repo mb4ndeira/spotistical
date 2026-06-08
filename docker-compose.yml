@@ -31,6 +31,8 @@ services:
     ports:
       - "${API_HOST_PORT:-8000}:8000"
     environment:
+      SPOTIFY_DATE_FROM:      ${SPOTIFY_DATE_FROM:-2023-10-18}
+      SPOTIFY_DATE_TO:        ${SPOTIFY_DATE_TO:-2025-06-11}
       GUARDIAN_API_KEY:       ${GUARDIAN_API_KEY:-}
       GENIUS_API_KEY:         ${GENIUS_API_KEY:-}
       GDELT_REQUEST_DELAY:    ${GDELT_REQUEST_DELAY:-6}
