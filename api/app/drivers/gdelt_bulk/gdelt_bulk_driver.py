@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import csv
 import io
 import logging
@@ -36,6 +37,8 @@ SPOTIFY_COUNTRIES: frozenset[str] = frozenset({
     "VN", "ZA",
 })
 
+_executor = concurrent.futures.ProcessPoolExecutor(max_workers=6)
+
 
 def _slot_timestamps(date_from: date, date_to: date) -> list[str]:
     slots: list[str] = []
@@ -45,10 +48,6 @@ def _slot_timestamps(date_from: date, date_to: date) -> list[str]:
         slots.append(cur.strftime("%Y%m%d%H%M%S"))
         cur += timedelta(minutes=15)
     return slots
-
-
-def _matches_themes(themes_str: str, theme_key: str) -> bool:
-    return any(f in themes_str for f in THEME_FILTERS.get(theme_key, []))
 
 
 def _parse_tone(tone_str: str) -> float | None:
@@ -68,33 +67,35 @@ def _parse_country(v2locations: str) -> str | None:
     return None
 
 
-def _parse_gkg_row(row: list[str], theme_key: str, source_lang: str | None) -> dict[str, Any] | None:
+def _parse_gkg_row_all_themes(
+    row: list[str],
+    source_lang: str | None,
+) -> dict[str, dict[str, Any]]:
     if len(row) < 16:
-        return None
-    if not _matches_themes(row[7], theme_key):
-        return None
+        return {}
 
     country = _parse_country(row[9]) if len(row) > 9 else None
     if country is None:
-        return None
+        return {}
 
     title_m = re.search(r'<PAGE_TITLE>(.*?)</PAGE_TITLE>', row[-1])
     if not title_m:
-        return None
+        return {}
     title = title_m.group(1).strip()[:1024]
     if not title:
-        return None
+        return {}
 
     try:
         pub = datetime.strptime(row[1][:14], "%Y%m%d%H%M%S")
     except (ValueError, TypeError):
-        return None
+        return {}
 
     url = (row[4] or "").strip()[:2048]
     if not url:
-        return None
+        return {}
 
-    return {
+    themes_str = row[7]
+    article = {
         "published_at": pub,
         "title":        title,
         "url":          url,
@@ -104,42 +105,51 @@ def _parse_gkg_row(row: list[str], theme_key: str, source_lang: str | None) -> d
         "source":       "gdelt_bulk",
     }
 
+    matched: dict[str, dict[str, Any]] = {}
+    for theme_key, codes in THEME_FILTERS.items():
+        if any(f in themes_str for f in codes):
+            matched[theme_key] = article
+    return matched
 
-async def _download_and_parse(
-    url: str,
-    theme_key: str,
-    source_lang: str | None,
-    client: httpx.AsyncClient,
-    timeout: float = 15,
-) -> list[dict[str, Any]]:
-    try:
-        resp = await client.get(url, timeout=timeout)
-        if resp.status_code == 404:
-            return []
-        resp.raise_for_status()
-    except httpx.TimeoutException:
-        logger.warning("GdeltBulk timeout: %s", url[-50:])
-        return []
-    except Exception as exc:
-        logger.debug("GdeltBulk error: %s — %s", url[-50:], exc)
-        return []
 
+def _parse_zip_bytes(content: bytes, source_lang: str | None) -> dict[str, list[dict]]:
     try:
-        zf  = zipfile.ZipFile(io.BytesIO(resp.content))
+        zf  = zipfile.ZipFile(io.BytesIO(content))
         raw = zf.read(zf.namelist()[0]).decode("utf-8", errors="replace")
     except Exception:
-        return []
+        return {}
 
-    results = []
+    results: dict[str, list] = {k: [] for k in THEME_FILTERS}
+    lang = source_lang
     for row in csv.reader(io.StringIO(raw), delimiter="\t"):
-        lang = source_lang
         if source_lang is None and len(row) > 25 and row[25]:
             m = re.search(r'srclang:([a-z]{2,3})', row[25])
             lang = m.group(1) if m else None
-        parsed = _parse_gkg_row(row, theme_key, lang)
-        if parsed:
-            results.append(parsed)
+        for theme_key, article in _parse_gkg_row_all_themes(row, lang).items():
+            results[theme_key].append(article)
     return results
+
+
+async def _download_and_parse_all(
+    url: str,
+    source_lang: str | None,
+    client: httpx.AsyncClient,
+    timeout: float = 15,
+) -> dict[str, list[dict[str, Any]]]:
+    try:
+        resp = await client.get(url, timeout=timeout)
+        if resp.status_code == 404:
+            return {}
+        resp.raise_for_status()
+    except httpx.TimeoutException:
+        logger.warning("GdeltBulk timeout: %s", url[-50:])
+        return {}
+    except Exception as exc:
+        logger.debug("GdeltBulk error: %s — %s", url[-50:], exc)
+        return {}
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, _parse_zip_bytes, resp.content, source_lang)
 
 
 class GdeltBulkDriver:
@@ -148,23 +158,33 @@ class GdeltBulkDriver:
         self,
         *,
         slots: list[str],
-        theme_key: str,
         client: httpx.AsyncClient,
         include_translations: bool = True,
         sem: asyncio.Semaphore,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, list[dict[str, Any]]]:
 
-        async def _one(ts: str) -> list[dict[str, Any]]:
+        async def _one(ts: str) -> dict[str, list[dict[str, Any]]]:
+            english_url = f"{_BASE}/{ts}.gkg.csv.zip"
+            tasks = [_download_and_parse_all(english_url, "English", client, timeout=15)]
+            if include_translations:
+                trans_url = f"{_BASE}/{ts}.translation.gkg.csv.zip"
+                tasks.append(_download_and_parse_all(trans_url, None, client, timeout=8))
             async with sem:
-                english_url = f"{_BASE}/{ts}.gkg.csv.zip"
-                results = await _download_and_parse(english_url, theme_key, "English", client, timeout=15)
-                if include_translations:
-                    trans_url = f"{_BASE}/{ts}.translation.gkg.csv.zip"
-                    results += await _download_and_parse(trans_url, theme_key, None, client, timeout=8)
-                return results
+                parts = await asyncio.gather(*tasks, return_exceptions=True)
+            merged: dict[str, list] = {k: [] for k in THEME_FILTERS}
+            for p in parts:
+                if isinstance(p, dict):
+                    for k, articles in p.items():
+                        merged[k].extend(articles)
+            return merged
 
-        batches = await asyncio.gather(*[_one(ts) for ts in slots])
-        return [a for batch in batches for a in batch]
+        slot_results = await asyncio.gather(*[_one(ts) for ts in slots])
+
+        combined: dict[str, list] = {k: [] for k in THEME_FILTERS}
+        for slot_result in slot_results:
+            for k, articles in slot_result.items():
+                combined[k].extend(articles)
+        return combined
 
     def slot_timestamps(self, date_from: date, date_to: date) -> list[str]:
         return _slot_timestamps(date_from, date_to)

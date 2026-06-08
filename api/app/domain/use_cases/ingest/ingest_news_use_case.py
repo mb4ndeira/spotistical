@@ -10,13 +10,12 @@ from typing import TypedDict
 import httpx
 
 from drivers.db.db_driver import get_admin_pool
-from drivers.gdelt_bulk.gdelt_bulk_driver import gdelt_bulk_driver, THEME_FILTERS
+from drivers.gdelt_bulk.gdelt_bulk_driver import gdelt_bulk_driver
 from drivers.guardian.guardian_driver import guardian_driver
 
 _GUARDIAN_DELAY  = float(os.environ.get("GUARDIAN_REQUEST_DELAY", "0.5"))
 _ALL_SOURCES     = {"gdelt_bulk"}
 
-THEMES = list(THEME_FILTERS.keys())
 
 _INSERT = """
     INSERT INTO news_events
@@ -25,8 +24,8 @@ _INSERT = """
     ON CONFLICT (url) DO NOTHING
 """
 
-_SLOT_BATCH    = 48
-_CONCURRENCY   = 20
+_SLOT_BATCH    = 96
+_CONCURRENCY   = 40
 _MAX_PER_DAY   = 30
 
 
@@ -173,7 +172,7 @@ class IngestNewsUseCase:
             rows = await conn.fetch(
                 """SELECT week_start FROM news_ingested_weeks
                    WHERE week_start BETWEEN $1 AND $2""",
-                date_from, date_to,
+                _week_start(date_from), date_to,
             )
         covered_weeks = {r["week_start"] for r in rows}
 
@@ -202,7 +201,7 @@ class IngestNewsUseCase:
 
         sem = asyncio.Semaphore(_CONCURRENCY)
 
-        limits = httpx.Limits(max_connections=50, max_keepalive_connections=20)
+        limits = httpx.Limits(max_connections=120, max_keepalive_connections=40)
         async with httpx.AsyncClient(timeout=30, limits=limits) as client:
             for week in weeks:
                 if week in covered_weeks:
@@ -283,26 +282,19 @@ class IngestNewsUseCase:
                 batch = day_slots[i : i + _SLOT_BATCH]
                 _progress["slot_current"] = batch[0]
 
-                theme_tasks = [
-                    gdelt_bulk_driver.fetch_slot_batch(
-                        slots=batch, theme_key=tk,
+                try:
+                    by_theme = await gdelt_bulk_driver.fetch_slot_batch(
+                        slots=batch,
                         client=client, sem=sem,
                         include_translations=include_translations,
                     )
-                    for tk in THEMES
-                ]
-                try:
-                    per_theme = await asyncio.gather(*theme_tasks, return_exceptions=True)
                 except Exception as exc:
                     _progress["last_error"] = f"gdelt_bulk batch {batch[0]}: {exc}"
                     await asyncio.sleep(0)
                     continue
 
-                for tk, result in zip(THEMES, per_theme):
-                    if isinstance(result, Exception):
-                        _progress["last_error"] = f"gdelt_bulk {tk} {batch[0]}: {result}"
-                        continue
-                    _sample_into_reservoir(result, tk, reservoir, seen)
+                for tk, articles in by_theme.items():
+                    _sample_into_reservoir(articles, tk, reservoir, seen)
 
                 _progress["slots_done"] += len(batch)
                 buffered = sum(len(v) for v in reservoir.values())
