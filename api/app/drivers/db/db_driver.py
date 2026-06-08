@@ -124,13 +124,37 @@ async def _grant_app_user() -> None:
 
 
 async def _run_migrations() -> None:
-    """Run 001 and 002 migrations (schema). 003 is run explicitly via lock_source_tables()."""
-    pool     = get_admin_pool()
-    sql_files = sorted(f for f in _MIGRATIONS_DIR.glob("*.sql") if not f.name.startswith("003"))
+    """Aplica migrações pendentes — cada arquivo roda no máximo uma vez.
+
+    Rastreia arquivos já aplicados em `schema_migrations(filename)`.
+    003_lock_sources.sql é excluído — roda explicitamente via lock_source_tables().
+    """
+    pool = get_admin_pool()
     async with pool.acquire() as conn:
+        # tabela de controle de migrações
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                filename TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+
+        already_applied = {
+            r["filename"]
+            for r in await conn.fetch("SELECT filename FROM schema_migrations")
+        }
+
+        sql_files = sorted(f for f in _MIGRATIONS_DIR.glob("*.sql") if not f.name.startswith("003"))
         for path in sql_files:
+            if path.name in already_applied:
+                print(f"[db] migration skipped (already applied): {path.name}")
+                continue
             try:
                 await conn.execute(path.read_text())
+                await conn.execute(
+                    "INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
+                    path.name,
+                )
                 print(f"[db] migration applied: {path.name}")
             except Exception as exc:
-                print(f"[db] migration skipped ({path.name}): {exc}")
+                print(f"[db] migration error ({path.name}): {exc}")

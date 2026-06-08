@@ -6,12 +6,9 @@
 --
 -- country = 'GL' is reserved for the optional global pass.
 --
--- idempotent — safe to re-run (DROP IF EXISTS + recreate)
 -- ─────────────────────────────────────────────────────────────────
 
-DROP TABLE IF EXISTS song_clusters;
-
-CREATE TABLE song_clusters (
+CREATE TABLE IF NOT EXISTS song_clusters (
     spotify_id          TEXT    NOT NULL,
     country             CHAR(2) NOT NULL,   -- ISO2C  or 'GL' (global)
 
