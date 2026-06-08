@@ -1,0 +1,15 @@
+meta {
+  name: start
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{API_URL}}/clustering/audio
+  body: none
+  auth: none
+}
+
+params:query {
+  include_global: false
+}

@@ -55,3 +55,9 @@ def setup_style() -> None:
         # fonte
         "font.family":       "sans-serif",
     })
+
+
+def _bar(done: int, total: int, width: int = 30) -> str:
+    pct  = done / total if total else 0
+    fill = int(pct * width)
+    return f"[{'█' * fill}{'░' * (width - fill)}] {done:,}/{total:,} ({pct:.1%})"

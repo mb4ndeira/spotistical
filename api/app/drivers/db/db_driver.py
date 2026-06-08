@@ -4,12 +4,6 @@ import os
 import pathlib
 import asyncpg
 
-# ── Two pools ─────────────────────────────────────────────────────
-# _app_pool   — app user, read-only on source tables (tracks, news_events)
-#               used by all normal API routes
-# _admin_pool — admin user (POSTGRES_USER), full write access
-#               used only by ingest routes
-
 _app_pool:   asyncpg.Pool | None = None
 _admin_pool: asyncpg.Pool | None = None
 
@@ -17,7 +11,6 @@ _MIGRATIONS_DIR = pathlib.Path(__file__).parent.parent.parent.parent / "migratio
 
 
 def _admin_kwargs() -> dict:
-    """Connection kwargs for the admin/ingest user."""
     user     = os.environ.get("POSTGRES_USER")
     password = os.environ.get("POSTGRES_PASSWORD")
     database = os.environ.get("POSTGRES_DB")
@@ -32,7 +25,6 @@ def _admin_kwargs() -> dict:
 
 
 def _app_kwargs() -> dict | None:
-    """Connection kwargs for the app user. Returns None if not configured."""
     user     = os.environ.get("POSTGRES_APP_USER")
     password = os.environ.get("POSTGRES_APP_PASSWORD")
     database = os.environ.get("POSTGRES_DB")
@@ -46,7 +38,6 @@ def _app_kwargs() -> dict | None:
 
 
 async def init() -> None:
-    """Create both pools and run pending migrations (as admin)."""
     global _app_pool, _admin_pool
 
     _admin_pool = await asyncpg.create_pool(**_admin_kwargs(), min_size=2, max_size=5, command_timeout=60)
@@ -74,64 +65,44 @@ async def close() -> None:
 
 
 def get_pool() -> asyncpg.Pool:
-    """App pool — read-only on source tables. Use for all normal queries."""
     if _app_pool is None:
         raise RuntimeError("DB pool not initialised — ensure startup completed")
     return _app_pool
 
 
 def get_admin_pool() -> asyncpg.Pool:
-    """Admin pool — full write access. Use only for ingest operations."""
     if _admin_pool is None:
         raise RuntimeError("Admin pool not initialised — ensure startup completed")
     return _admin_pool
 
 
 async def lock_source_tables() -> None:
-    """Apply 003_lock_sources.sql using the app user name from env."""
     app_user = os.environ.get("POSTGRES_APP_USER", "")
     sql_path = _MIGRATIONS_DIR / "003_lock_sources.sql"
     sql      = sql_path.read_text()
 
     pool = get_admin_pool()
     async with pool.acquire() as conn:
-        # Set the session variable so the DO block inside the migration can read it
         await conn.execute(f"SET LOCAL spotistical.app_user = '{app_user}'")
         await conn.execute(sql)
     print(f"[db] source tables locked — app user '{app_user}' is now read-only on tracks + news_events")
 
 
 async def _grant_app_user() -> None:
-    """Grant the app user read access to source tables and read-write to derived tables.
-
-    Runs on every startup — idempotent (GRANT is a no-op if already granted).
-    Derived tables (song_clusters, insights) must be readable by the app user
-    so notebooks and API routes can query them without admin credentials.
-    Source table write protection is a separate concern handled by 003_lock_sources.sql.
-    """
     app_user = os.environ.get("POSTGRES_APP_USER")
     if not app_user:
         return
     pool = get_admin_pool()
     async with pool.acquire() as conn:
-        # source tables — read only
         await conn.execute(f'GRANT SELECT ON tracks, news_events TO "{app_user}"')
-        # derived tables — full read-write (pipeline owns these)
         await conn.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON song_clusters, insights, track_lyrics TO "{app_user}"')
-        # sequences needed for INSERT on tables with bigserial PKs
         await conn.execute(f'GRANT USAGE, SELECT ON SEQUENCE insights_id_seq, news_events_id_seq TO "{app_user}"')
     print(f"[db] app user '{app_user}' grants refreshed")
 
 
 async def _run_migrations() -> None:
-    """Aplica migrações pendentes — cada arquivo roda no máximo uma vez.
-
-    Rastreia arquivos já aplicados em `schema_migrations(filename)`.
-    003_lock_sources.sql é excluído — roda explicitamente via lock_source_tables().
-    """
     pool = get_admin_pool()
     async with pool.acquire() as conn:
-        # tabela de controle de migrações
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 filename TEXT PRIMARY KEY,

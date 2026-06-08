@@ -8,7 +8,6 @@ import pandas as pd
 
 from drivers.db.db_driver import get_admin_pool
 
-# ── Country name → ISO 3166-1 alpha-2 ─────────────────────────────
 COUNTRY_TO_ISO2: dict[str, str] = {
     "Argentina": "AR", "Australia": "AU", "Austria": "AT",
     "Belarus": "BY", "Belgium": "BE", "Bolivia": "BO",
@@ -69,11 +68,6 @@ def _safe_float(val: object) -> float | None:
 
 
 class IngestTracksUseCase:
-    """Load spotify_processed.parquet → tracks hypertable.
-
-    Skips rows with no country or unmapped country name.
-    Uses INSERT … ON CONFLICT DO NOTHING so re-running is safe.
-    """
 
     _INSERT = """
         INSERT INTO tracks (
@@ -94,7 +88,6 @@ class IngestTracksUseCase:
     async def execute(self) -> dict:
         df = pd.read_parquet(_PARQUET_PATH, engine="pyarrow")
 
-        # Drop rows without a mappable country
         df = df[df["country"].notna()]
         df["country_code"] = df["country"].map(COUNTRY_TO_ISO2)
         df = df[df["country_code"].notna()]

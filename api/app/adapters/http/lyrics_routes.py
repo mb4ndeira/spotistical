@@ -17,15 +17,6 @@ async def fetch_lyrics(
         description="Re-attempt tracks that previously returned 404 / timeout.",
     ),
 ):
-    """
-    Batch-fetch lyrics from lyrics.ovh for all unique tracks in the DB.
-
-    Ordered by chart appearances DESC — most important tracks first.
-    Skips tracks already in track_lyrics (idempotent, safe to re-run).
-    Rate: ~2 req/sec (0.5s delay). ~25k tracks ≈ 3.5 hours.
-
-    Watch progress: GET /lyrics/status
-    """
     global _running
     if _running:
         raise HTTPException(409, "Lyrics fetch already running")
@@ -49,23 +40,11 @@ async def fetch_lyrics(
 
 @router.get("/status")
 async def lyrics_status():
-    """
-    Live progress of the lyrics fetch pipeline.
-
-    stage         : idle | loading | fetching | done | error
-    tracks_total  : tracks to process this run (excludes already-done)
-    tracks_done   : processed so far (found + failed)
-    tracks_found  : lyrics successfully retrieved
-    tracks_failed : 404 / timeout / empty
-    tracks_skipped: already in track_lyrics, not re-fetched
-    current_track : track being fetched right now
-    """
     return get_progress()
 
 
 @router.post("/stop")
 async def stop_lyrics_fetch():
-    """Request a graceful stop of the running lyrics fetch."""
     if not get_progress()["running"]:
         raise HTTPException(400, "No fetch running")
     request_stop()
@@ -74,7 +53,6 @@ async def stop_lyrics_fetch():
 
 @router.get("/coverage")
 async def lyrics_coverage():
-    """DB-level coverage summary — total rows, success rate, top fail reasons."""
     import drivers.db.db_driver as db_driver
     try:
         pool = db_driver.get_pool()

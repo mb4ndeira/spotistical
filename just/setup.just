@@ -1,7 +1,3 @@
-# ── First-time setup ────────────────────────────────────────────────────────────
-
-# Start services and wait for the API to be ready.
-# Then open notebooks/00_pipeline.ipynb to ingest data and lock sources.
 bootstrap:
     #!/bin/bash
     set -euo pipefail
@@ -10,7 +6,6 @@ bootstrap:
     echo "  spotistical · bootstrap"
     echo "  ────────────────────────────────────────────────"
 
-    # 1. Check .env exists
     if [ ! -f "{{ justfile_directory() }}/.env" ]; then
         echo ""
         echo "  ✗  .env not found."
@@ -21,12 +16,10 @@ bootstrap:
     fi
     echo "  ✓  .env found"
 
-    # 2. Start services (DB first via depends_on healthcheck)
     echo "  →  Starting services…"
     {{ compose }} up -d
     echo "  ✓  Services started"
 
-    # 3. Wait for API + DB
     echo "  →  Waiting for API…"
     for i in $(seq 1 30); do
         status=$(curl -s http://localhost:${API_HOST_PORT:-8000}/health 2>/dev/null \
@@ -40,7 +33,6 @@ bootstrap:
     fi
     echo "  ✓  API + DB connected"
 
-    # 4. Ensure app user exists (idempotent)
     echo "  →  Ensuring app user…"
     {{ compose }} exec -T db psql \
         -U "${POSTGRES_USER:-spotify}" \

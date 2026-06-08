@@ -1,27 +1,3 @@
-"""
-fetch_lyrics_use_case.py
-────────────────────────
-Task 2 — Batch fetch lyrics from lyrics.ovh for all unique tracks.
-
-Order
------
-Tracks are processed most-charted first so the important ones get lyrics even
-if the run is interrupted.
-
-Concurrency
------------
-lyrics.ovh has no published rate limit and requires no API key.
-We run LYRICS_CONCURRENCY requests in parallel (default 5) controlled by an
-asyncio.Semaphore. No artificial delay between requests — the semaphore is
-enough to be a reasonable citizen of a free community service.
-
-Idempotency / restart tolerance
---------------------------------
-On every run, the pipeline loads the full track_lyrics table from the DB
-before starting. Tracks already there (succeeded or failed) are skipped.
-A restart loses at most the in-flight concurrent batch — those are simply
-re-fetched on the next run.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -36,8 +12,6 @@ from drivers.lyrics.lyrics_driver import fetch_lyrics
 CONCURRENCY   = int(os.environ.get("LYRICS_CONCURRENCY",   "15"))
 BATCH_SIZE    = int(os.environ.get("LYRICS_BATCH_SIZE",   "100"))
 
-
-# ── progress ──────────────────────────────────────────────────────────────────
 
 class LyricsProgress(TypedDict):
     running:        bool
@@ -79,8 +53,6 @@ def _set(**kwargs) -> None:
     _progress.update(kwargs)
 
 
-# ── use case ──────────────────────────────────────────────────────────────────
-
 class FetchLyricsUseCase:
 
     async def execute(self, retry_failed: bool = False) -> dict:
@@ -103,7 +75,6 @@ class FetchLyricsUseCase:
     async def _pipeline(self, retry_failed: bool) -> dict:
         pool = db_driver.get_admin_pool()
 
-        # 1. load tracks ordered by chart appearances (most important first)
         _set(stage="loading")
         async with pool.acquire() as conn:
             rows = await conn.fetch("""
@@ -119,7 +90,6 @@ class FetchLyricsUseCase:
                 ORDER BY appearances DESC
             """)
 
-        # 2. find already-processed tracks
         async with pool.acquire() as conn:
             done_rows = await conn.fetch("SELECT spotify_id, failed, fail_reason FROM track_lyrics")
         done = {r["spotify_id"]: (r["failed"], r["fail_reason"]) for r in done_rows}
@@ -129,7 +99,6 @@ class FetchLyricsUseCase:
             sid = r["spotify_id"]
             if sid in done:
                 failed, reason = done[sid]
-                # connection_failed sempre retenta — é erro de rede, não da música
                 if failed and reason == "connection_failed":
                     to_fetch.append(r)
                 elif failed and retry_failed:
@@ -143,7 +112,6 @@ class FetchLyricsUseCase:
         print(f"[lyrics/fetch] {len(to_fetch):,} to fetch  ·  {skipped:,} skipped"
               f"  ·  concurrency={CONCURRENCY}")
 
-        # 3. worker-queue concurrency — only CONCURRENCY coroutines exist at once
         queue   = asyncio.Queue()
         for row in to_fetch:
             await queue.put(row)
@@ -187,7 +155,6 @@ class FetchLyricsUseCase:
             workers = [asyncio.create_task(worker(client)) for _ in range(CONCURRENCY)]
             await asyncio.gather(*workers)
 
-        # flush remainder
         if results:
             await self._flush(results, pool)
 

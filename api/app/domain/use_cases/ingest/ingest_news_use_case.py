@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import random
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import TypedDict
 
 import httpx
@@ -16,8 +16,7 @@ from drivers.guardian.guardian_driver import guardian_driver
 _GUARDIAN_DELAY  = float(os.environ.get("GUARDIAN_REQUEST_DELAY", "0.5"))
 _ALL_SOURCES     = {"gdelt_bulk"}
 
-# Temas a ingerir — chaves têm que existir em THEME_FILTERS e THEME_SECTIONS
-THEMES = list(THEME_FILTERS.keys())  # ["music", "sports", "economy"]
+THEMES = list(THEME_FILTERS.keys())
 
 _INSERT = """
     INSERT INTO news_events
@@ -26,9 +25,9 @@ _INSERT = """
     ON CONFLICT (url) DO NOTHING
 """
 
-
-_SLOT_BATCH   = 48   # slots por batch (~12h de dados)
-_CONCURRENCY  = 20   # downloads paralelos — dentro do pool de conexões httpx
+_SLOT_BATCH    = 48
+_CONCURRENCY   = 20
+_MAX_PER_DAY   = 30
 
 
 class Progress(TypedDict):
@@ -84,30 +83,70 @@ def _weeks_in_range(date_from: date, date_to: date) -> list[date]:
     return weeks
 
 
+def _parse_pub(a: dict) -> datetime | None:
+    pub = a.get("published_at")
+    if isinstance(pub, str):
+        try:
+            return datetime.fromisoformat(pub.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return pub
+
+
+def _make_record(a: dict, theme_key: str, pub: datetime) -> tuple:
+    return (
+        pub,
+        a["title"],
+        a["url"],
+        a.get("country"),
+        a.get("tone"),
+        a.get("source_lang"),
+        json.dumps([theme_key]),
+        a.get("source"),
+    )
+
+
+def _sample_into_reservoir(
+    articles: list[dict],
+    theme_key: str,
+    reservoir: dict,
+    seen: dict,
+) -> None:
+    for a in articles:
+        pub = _parse_pub(a)
+        if pub is None:
+            continue
+        key = (a.get("country"), theme_key, pub.date())
+        seen[key] = seen.get(key, 0) + 1
+        n = seen[key]
+        record = _make_record(a, theme_key, pub)
+        bucket = reservoir.setdefault(key, [])
+        if len(bucket) < _MAX_PER_DAY:
+            bucket.append(record)
+        else:
+            j = random.randint(0, n - 1)
+            if j < _MAX_PER_DAY:
+                bucket[j] = record
+
+
+async def _flush_reservoir(reservoir: dict, pool) -> int:
+    records = [r for bucket in reservoir.values() for r in bucket]
+    if not records:
+        return 0
+    async with pool.acquire() as conn:
+        await conn.executemany(_INSERT, records)
+    return len(records)
+
+
 async def _insert_articles(articles: list[dict], theme_key: str, pool) -> int:
     if not articles:
         return 0
-    from datetime import datetime
     records = []
     for a in articles:
-        pub = a.get("published_at")
-        if isinstance(pub, str):
-            try:
-                pub = datetime.fromisoformat(pub.replace("Z", "+00:00"))
-            except ValueError:
-                continue
+        pub = _parse_pub(a)
         if pub is None:
             continue
-        records.append((
-            pub,
-            a["title"],
-            a["url"],
-            a.get("country"),
-            a.get("tone"),
-            a.get("source_lang"),
-            json.dumps([theme_key]),
-            a.get("source"),
-        ))
+        records.append(_make_record(a, theme_key, pub))
     if not records:
         return 0
     async with pool.acquire() as conn:
@@ -116,21 +155,6 @@ async def _insert_articles(articles: list[dict], theme_key: str, pool) -> int:
 
 
 class IngestNewsUseCase:
-    """Backfill news_events via GDELT Bulk (primário) + Guardian (secundário).
-
-    GDELT Bulk:
-    - Sem rate limit — baixa arquivos GKG de 15 em 15 minutos diretamente
-    - Multilingual (inglês + arquivos de tradução)
-    - Tone nativo, cobertura global
-
-    Guardian:
-    - Inglês, alta qualidade editorial
-    - 500 req/dia free — para graciosamente ao atingir guardian_daily_limit
-    - Complementa GDELT com publicações premium não indexadas
-
-    Semanas com GDELT bulk já no banco são puladas.
-    ON CONFLICT (url) DO NOTHING — sem duplicatas entre fontes.
-    """
 
     async def execute(
         self,
@@ -145,7 +169,6 @@ class IngestNewsUseCase:
         pool  = get_admin_pool()
         weeks = _weeks_in_range(date_from, date_to)
 
-        # semana coberta = registrada em news_ingested_weeks (completa + curada)
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT week_start FROM news_ingested_weeks
@@ -189,11 +212,9 @@ class IngestNewsUseCase:
                 w_end = min(_week_end(week), date_to)
                 _progress["week_current"] = str(week)
 
-                # GDELT Bulk — processa em batches de slots, insere e atualiza progresso a cada batch
                 if "gdelt_bulk" in active_sources:
                     await self._fetch_bulk_week(week, w_end, client, pool, sem, include_translations=True)
 
-                # Guardian — por tema, para se atingiu o limite
                 if (
                     "guardian" in active_sources
                     and guardian_req_counter[0] < guardian_daily_limit
@@ -211,11 +232,7 @@ class IngestNewsUseCase:
                             _progress["last_error"] = str(r)
                     _progress["guardian_requests_today"] = guardian_req_counter[0]
 
-                # Curadoria pós-semana: mantém até 200 artigos por (country, theme)
-                # distribuídos proporcionalmente por dia via amostragem estratificada
-                deleted = await self._curate_week(week, w_end, pool)
-                if deleted:
-                    print(f"[news-ingest] curadoria {week} — {deleted:,} artigos removidos")
+                await self._register_week(week, w_end, pool)
 
                 _progress["weeks_done"] += 1
 
@@ -232,70 +249,18 @@ class IngestNewsUseCase:
             "guardian_requests_today":    _progress["guardian_requests_today"],
         }
 
-    async def _curate_week(self, week: date, w_end: date, pool, max_per_group: int = 200) -> int:
-        """Amostragem estratificada por dia: mantém até max_per_group artigos por (country, theme).
-
-        Cada dia recebe floor(200 * day_count / week_count) slots — proporcional ao volume.
-        Dentro de cada dia a seleção é aleatória (ORDER BY random()).
-        Artigos sem country são descartados integralmente.
-        Após curadoria registra a semana em news_ingested_weeks — só então ela é
-        considerada "coberta" e pulada em runs futuros.
-        """
+    async def _register_week(self, week: date, w_end: date, pool) -> None:
         async with pool.acquire() as conn:
-            before = await conn.fetchval(
+            count = await conn.fetchval(
                 "SELECT count(*) FROM news_events WHERE published_at::date BETWEEN $1 AND $2",
                 week, w_end,
             )
-
-            result = await conn.execute("""
-                DELETE FROM news_events
-                WHERE published_at::date BETWEEN $1 AND $2
-                  AND id IN (
-                    SELECT id FROM (
-                      SELECT id,
-                             ROW_NUMBER() OVER (
-                               PARTITION BY country,
-                                            topics::text,
-                                            published_at::date
-                               ORDER BY random()
-                             )                              AS rn_day,
-                             COUNT(*) OVER (
-                               PARTITION BY country, topics::text, published_at::date
-                             )                              AS day_count,
-                             COUNT(*) OVER (
-                               PARTITION BY country, topics::text
-                             )                              AS week_count
-                      FROM news_events
-                      WHERE published_at::date BETWEEN $1 AND $2
-                        AND country IS NOT NULL
-                    ) ranked
-                    WHERE rn_day > CEIL($3::numeric * day_count::numeric / week_count::numeric)
-
-                    UNION ALL
-
-                    SELECT id FROM news_events
-                    WHERE published_at::date BETWEEN $1 AND $2
-                      AND country IS NULL
-                  )
-            """, week, w_end, max_per_group)
-
-            after = await conn.fetchval(
-                "SELECT count(*) FROM news_events WHERE published_at::date BETWEEN $1 AND $2",
-                week, w_end,
-            )
-
-            # marca semana como concluída — runs futuros vão pular
             await conn.execute("""
                 INSERT INTO news_ingested_weeks
                     (week_start, articles_before_curation, articles_after_curation)
-                VALUES ($1, $2, $3)
+                VALUES ($1, $2, $2)
                 ON CONFLICT (week_start) DO NOTHING
-            """, week, before, after)
-
-        try:
-            return int(result.split()[-1])
-        except (ValueError, IndexError):
-            return 0
+            """, week, count)
 
     async def _fetch_bulk_week(
         self, week: date, w_end: date,
@@ -303,40 +268,53 @@ class IngestNewsUseCase:
         sem: asyncio.Semaphore,
         include_translations: bool = False,
     ) -> None:
-        """Processa uma semana em batches de slots — insere e reporta progresso a cada batch."""
         slots = gdelt_bulk_driver.slot_timestamps(week, w_end)
 
-        for i in range(0, len(slots), _SLOT_BATCH):
-            batch = slots[i : i + _SLOT_BATCH]
-            _progress["slot_current"] = batch[0]
+        slots_by_day: dict[date, list[str]] = {}
+        for s in slots:
+            d = date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+            slots_by_day.setdefault(d, []).append(s)
 
-            # todos os temas em paralelo dentro do batch
-            theme_tasks = [
-                gdelt_bulk_driver.fetch_slot_batch(
-                    slots=batch, theme_key=tk,
-                    client=client, sem=sem,
-                    include_translations=include_translations,
-                )
-                for tk in THEMES
-            ]
-            try:
-                per_theme = await asyncio.gather(*theme_tasks, return_exceptions=True)
-            except Exception as exc:
-                _progress["last_error"] = f"gdelt_bulk batch {batch[0]}: {exc}"
-                continue
+        for day, day_slots in sorted(slots_by_day.items()):
+            reservoir: dict = {}
+            seen: dict = {}
 
-            for tk, result in zip(THEMES, per_theme):
-                if isinstance(result, Exception):
-                    _progress["last_error"] = f"gdelt_bulk {tk} {batch[0]}: {result}"
+            for i in range(0, len(day_slots), _SLOT_BATCH):
+                batch = day_slots[i : i + _SLOT_BATCH]
+                _progress["slot_current"] = batch[0]
+
+                theme_tasks = [
+                    gdelt_bulk_driver.fetch_slot_batch(
+                        slots=batch, theme_key=tk,
+                        client=client, sem=sem,
+                        include_translations=include_translations,
+                    )
+                    for tk in THEMES
+                ]
+                try:
+                    per_theme = await asyncio.gather(*theme_tasks, return_exceptions=True)
+                except Exception as exc:
+                    _progress["last_error"] = f"gdelt_bulk batch {batch[0]}: {exc}"
+                    await asyncio.sleep(0)
                     continue
-                n = await _insert_articles(result, tk, pool)
-                _progress["articles_inserted_bulk"] += n
 
-            _progress["slots_done"] += len(batch)
-            print(
-                f"[news-ingest] gdelt_bulk {week}  slots {i+len(batch)}/{len(slots)}"
-                f"  total={_progress['articles_inserted_bulk']:,}"
-            )
+                for tk, result in zip(THEMES, per_theme):
+                    if isinstance(result, Exception):
+                        _progress["last_error"] = f"gdelt_bulk {tk} {batch[0]}: {result}"
+                        continue
+                    _sample_into_reservoir(result, tk, reservoir, seen)
+
+                _progress["slots_done"] += len(batch)
+                buffered = sum(len(v) for v in reservoir.values())
+                print(
+                    f"[news-ingest] {day}  slots {i+len(batch)}/{len(day_slots)}"
+                    f"  buffered={buffered:,}"
+                )
+                await asyncio.sleep(0)
+
+            n = await _flush_reservoir(reservoir, pool)
+            _progress["articles_inserted_bulk"] += n
+            print(f"[news-ingest] {day} — inserted {n:,} articles")
 
     async def _fetch_guardian(
         self, week: date, w_end: date, theme_key: str,

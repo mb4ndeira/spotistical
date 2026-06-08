@@ -1,0 +1,15 @@
+meta {
+  name: start
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{API_URL}}/lyrics/fetch
+  body: none
+  auth: none
+}
+
+params:query {
+  retry_failed: false
+}

@@ -1,0 +1,17 @@
+meta {
+  name: start
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{API_URL}}/ingest/news
+  body: none
+  auth: none
+}
+
+params:query {
+  date_from: {{DATE_FROM}}
+  date_to: {{DATE_TO}}
+  sources: gdelt_bulk
+}

@@ -12,7 +12,6 @@ from typing import Any
 
 import httpx
 
-# GKG tem campos muito longos (GCAM chega a centenas de KB por linha)
 csv.field_size_limit(min(sys.maxsize, 10_000_000))
 
 logger = logging.getLogger(__name__)
@@ -26,7 +25,6 @@ THEME_FILTERS: dict[str, list[str]] = {
     "economy": ["ECON_", "EPU_CATS", "BUS_MARKET", "BUS_STOCK"],
 }
 
-# Países do Spotify — ISO 3166-1 alpha-2, extraídos da tabela tracks
 SPOTIFY_COUNTRIES: frozenset[str] = frozenset({
     "AE", "AR", "AT", "AU", "BE", "BG", "BO", "BR", "BY", "CA",
     "CH", "CL", "CO", "CR", "CZ", "DE", "DK", "DO", "EC", "EE",
@@ -61,7 +59,6 @@ def _parse_tone(tone_str: str) -> float | None:
 
 
 def _parse_country(v2locations: str) -> str | None:
-    """Retorna o primeiro país de V2Locations que esteja nos 72 países do Spotify."""
     for loc in v2locations.split(";"):
         parts = loc.split("#")
         if len(parts) >= 3 and parts[2]:
@@ -77,7 +74,6 @@ def _parse_gkg_row(row: list[str], theme_key: str, source_lang: str | None) -> d
     if not _matches_themes(row[7], theme_key):
         return None
 
-    # filtro de país — descarta artigos sem menção a nenhum dos 72 países do Spotify
     country = _parse_country(row[9]) if len(row) > 9 else None
     if country is None:
         return None
@@ -136,7 +132,6 @@ async def _download_and_parse(
 
     results = []
     for row in csv.reader(io.StringIO(raw), delimiter="\t"):
-        # para arquivos de tradução, extrai idioma do TranslationInfo (col 25)
         lang = source_lang
         if source_lang is None and len(row) > 25 and row[25]:
             m = re.search(r'srclang:([a-z]{2,3})', row[25])
@@ -148,11 +143,6 @@ async def _download_and_parse(
 
 
 class GdeltBulkDriver:
-    """Baixa arquivos GKG brutos do GDELT v2 — sem rate limit, sem API key.
-
-    fetch_slot_batch: baixa um lote de slots em paralelo (concurrency controlada por semáforo).
-    Retorna artigos já filtrados por tema — o use case insere e atualiza progresso por lote.
-    """
 
     async def fetch_slot_batch(
         self,
@@ -163,7 +153,6 @@ class GdeltBulkDriver:
         include_translations: bool = True,
         sem: asyncio.Semaphore,
     ) -> list[dict[str, Any]]:
-        """Baixa e parseia um lote de slots em paralelo, respeitando o semáforo global."""
 
         async def _one(ts: str) -> list[dict[str, Any]]:
             async with sem:
@@ -171,7 +160,6 @@ class GdeltBulkDriver:
                 results = await _download_and_parse(english_url, theme_key, "English", client, timeout=15)
                 if include_translations:
                     trans_url = f"{_BASE}/{ts}.translation.gkg.csv.zip"
-                    # timeout curto para traduções — maioria são 404 rápidos
                     results += await _download_and_parse(trans_url, theme_key, None, client, timeout=8)
                 return results
 

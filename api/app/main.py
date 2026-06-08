@@ -15,16 +15,12 @@ import drivers.db.db_driver as db_driver
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── startup ──────────────────────────────────────────────────
     try:
         await db_driver.init()
         print("[startup] DB pool ready, migrations applied")
     except Exception as exc:
-        # Don't crash the API if DB is unreachable at startup —
-        # allows running without a DB for parquet-only dev mode.
         print(f"[startup] DB unavailable ({exc}) — running in parquet-only mode")
     yield
-    # ── shutdown ─────────────────────────────────────────────────
     await db_driver.close()
 
 

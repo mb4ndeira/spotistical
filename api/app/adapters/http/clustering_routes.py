@@ -20,20 +20,6 @@ async def run_audio_clustering(
         description="Also run a global pass (country='GL') after all per-country passes.",
     ),
 ):
-    """
-    K-Means audio clustering — per country.
-
-    For every country in the tracks table, loads the distinct tracks that
-    charted there, runs a silhouette sweep (k=5–15), fits the best k, projects
-    with UMAP, and persists to song_clusters(spotify_id, country).
-
-    The same track will have different cluster IDs in different markets —
-    each assignment reflects its role in that country's music landscape.
-
-    Pass include_global=true to also run a global pass (country='GL').
-
-    Safe to re-run — ON CONFLICT DO UPDATE.
-    """
     global _running
     if _running:
         raise HTTPException(409, "Audio clustering already running")
@@ -57,15 +43,4 @@ async def run_audio_clustering(
 
 @router.get("/audio/status")
 async def audio_clustering_status():
-    """
-    Live progress of the audio clustering pipeline.
-
-    country_current   — which market is being processed right now
-    countries_done    — markets completed
-    countries_total   — total markets found in tracks table
-    countries_skipped — markets with too few tracks (< 30 unique)
-    k_current         — k being evaluated in the silhouette sweep
-    k_best_this       — best k chosen for the current country
-    tracks_persisted  — total rows written to song_clusters so far
-    """
     return get_progress()

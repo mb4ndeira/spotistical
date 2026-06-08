@@ -14,15 +14,8 @@ _tracks_running = False
 _news_running   = False
 
 
-# ── Tracks ────────────────────────────────────────────────────────
-
 @router.post("/tracks")
 async def ingest_tracks(background_tasks: BackgroundTasks):
-    """Load spotify_processed.parquet → tracks hypertable.
-
-    Runs in the background. Safe to re-run (ON CONFLICT DO NOTHING).
-    Source table — no modifications allowed after just lock-sources is run.
-    """
     global _tracks_running
     if _tracks_running:
         raise HTTPException(409, "Tracks ingest already running")
@@ -45,8 +38,6 @@ async def tracks_status():
     return {"running": _tracks_running}
 
 
-# ── News ──────────────────────────────────────────────────────────
-
 _VALID_SOURCES = {"gdelt_bulk", "guardian"}
 
 
@@ -60,14 +51,6 @@ async def ingest_news(
     guardian_daily_limit:  int       = Query(default=490,
                                              description="Máx. requests Guardian por dia (teto free tier: 500)"),
 ):
-    """Backfill news_events via fontes configuráveis.
-
-    - **gdelt_bulk** (primário, padrão): arquivos GKG brutos, sem rate limit, multilingual, tone nativo.
-    - **guardian** (secundário, padrão): inglês, alta qualidade, 500 req/dia. Requer GUARDIAN_API_KEY.
-
-    Incremental — semanas com gdelt_bulk já no banco são puladas.
-    Safe to re-run (ON CONFLICT (url) DO NOTHING).
-    """
     global _news_running
     if _news_running:
         raise HTTPException(409, "News ingest already running")
@@ -103,10 +86,8 @@ async def ingest_news(
 
 @router.get("/news/status")
 async def news_status():
-    """Live progress + DB coverage summary."""
     progress = get_progress()
 
-    # Coverage summary straight from the DB
     try:
         pool = db_driver.get_pool()
         async with pool.acquire() as conn:
@@ -130,18 +111,8 @@ async def news_status():
     return {**progress, "db_coverage": coverage}
 
 
-# ── Lock ──────────────────────────────────────────────────────────
-
 @router.post("/lock-sources")
 async def lock_sources():
-    """Apply source table protection after ingest is complete.
-
-    Installs DB triggers that block UPDATE/DELETE on tracks and news_events
-    for all users, and restricts the app user to SELECT-only on those tables.
-
-    Run once after both ingest/tracks and ingest/news are finished.
-    Idempotent — safe to call multiple times.
-    """
     if _tracks_running or _news_running:
         raise HTTPException(409, "Cannot lock while an ingest is running")
     await db_driver.lock_source_tables()

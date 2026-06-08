@@ -1,37 +1,3 @@
-"""
-audio_clustering_use_case.py
-────────────────────────────
-Task 1 — Per-country K-Means audio clustering.
-
-Why per-country?
-----------------
-K-Means finds clusters *relative to the dataset it sees*.  Clustering globally
-forces a Brazilian funk track and a Norwegian pop track to share centroids,
-blurring the local signal.  Clustering per-country means each cluster answers
-"what role does this track play in THIS market?" — which maps directly onto
-local news events.
-
-The same track will typically land in different clusters across countries;
-both assignments are stored in song_clusters with the composite key
-(spotify_id, country).  country='GL' is reserved for an optional global pass.
-
-Pipeline (per country)
------------------------
-1. Load distinct tracks that appeared in that country's Top 50.
-   Audio features are averaged across all appearances.
-2. Drop tracks with any NULL audio feature.
-3. StandardScaler — zero-mean, unit-variance within that country's dataset.
-4. Silhouette sweep k = K_MIN_C … K_MAX_C (smaller range; datasets are smaller).
-   Pick k with the highest silhouette score.
-5. Fit final K-Means with best k.
-6. UMAP 2-D projection (per-country, so coordinates reflect local structure).
-7. Upsert into song_clusters ON CONFLICT (spotify_id, country) DO UPDATE.
-
-After all 73+ countries, an optional global pass (country='GL') uses the
-wider sweep K_MIN_GL … K_MAX_GL over all unique tracks combined.
-
-Progress is exposed via get_progress() → GET /clustering/audio/status.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -42,23 +8,18 @@ import numpy as np
 
 import drivers.db.db_driver as db_driver
 
-# ── constants ──────────────────────────────────────────────────────────────────
-
 AUDIO_FEATURES: list[str] = [
     "danceability", "energy", "key", "loudness", "mode",
     "speechiness", "acousticness", "instrumentalness",
     "liveness", "valence", "tempo", "time_signature",
 ]
 
-# Per-country sweep — smaller datasets, tighter range
 K_MIN_C = 5
 K_MAX_C = 15
 
-# Global sweep — full dataset, wider range
 K_MIN_GL = 10
 K_MAX_GL = 30
 
-# Minimum distinct tracks in a country to attempt clustering
 MIN_TRACKS = 30
 
 UMAP_N_NEIGHBORS = 15
@@ -67,20 +28,18 @@ UMAP_MIN_DIST    = 0.1
 BATCH_SIZE = 2_000
 
 
-# ── progress state ─────────────────────────────────────────────────────────────
-
 class ClusteringProgress(TypedDict):
     running:            bool
-    stage:              str          # idle | loading_countries | clustering | global_pass | done | error
+    stage:              str
     run_id:             Optional[str]
     country_current:    Optional[str]
     countries_done:     int
     countries_total:    int
-    countries_skipped:  int          # too few tracks
+    countries_skipped:  int
     k_current:          Optional[int]
     k_best_this:        Optional[int]
-    tracks_this:        int          # tracks in current country
-    tracks_persisted:   int          # total rows written
+    tracks_this:        int
+    tracks_persisted:   int
     last_error:         Optional[str]
 
 
@@ -108,12 +67,9 @@ def _set(**kwargs) -> None:
     _progress.update(kwargs)
 
 
-# ── use case ───────────────────────────────────────────────────────────────────
-
 class AudioClusteringUseCase:
 
     async def execute(self, include_global: bool = False) -> dict:
-        """Entry point — call from a BackgroundTask."""
         run_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         _set(
             running=True, stage="loading_countries", run_id=run_id,
@@ -131,13 +87,10 @@ class AudioClusteringUseCase:
         finally:
             _set(running=False)
 
-    # ── private ────────────────────────────────────────────────────────────────
-
     async def _pipeline(self, include_global: bool, run_id: str) -> dict:
 
         pool = db_driver.get_admin_pool()
 
-        # 1. get all countries present in the tracks table
         async with pool.acquire() as conn:
             country_rows = await conn.fetch(
                 "SELECT DISTINCT country FROM tracks ORDER BY country"
@@ -152,7 +105,6 @@ class AudioClusteringUseCase:
         for country in countries:
             _set(country_current=country, k_current=None, k_best_this=None)
 
-            # 2. load features for this country
             rows = await self._load_country(pool, country)
             if len(rows) < MIN_TRACKS:
                 print(f"[clustering/audio] {country}: only {len(rows)} tracks — skipping")
@@ -167,13 +119,11 @@ class AudioClusteringUseCase:
             _set(tracks_this=len(spotify_ids))
             print(f"[clustering/audio] {country}: {len(spotify_ids)} tracks")
 
-            # 3. CPU work in thread
             loop       = asyncio.get_event_loop()
             cpu_result = await loop.run_in_executor(
                 None, _cpu_work, spotify_ids, X_raw, K_MIN_C, K_MAX_C
             )
 
-            # 4. persist (with this run's run_id)
             n = await self._persist(cpu_result, country, run_id, pool)
             total_persisted += n
 
@@ -181,7 +131,6 @@ class AudioClusteringUseCase:
             _set(countries_done=done, tracks_persisted=total_persisted,
                  k_best_this=cpu_result["best_k"])
 
-        # 5. optional global pass
         if include_global:
             _set(stage="global_pass", country_current="GL")
             print("[clustering/audio] running global pass (country=GL) …")
@@ -199,8 +148,6 @@ class AudioClusteringUseCase:
                 n = await self._persist(cpu_result, "GL", run_id, pool)
                 total_persisted += n
 
-        # 6. invalidate insights from previous clustering runs
-        #    (cluster IDs renumber — old insights would reference wrong clusters)
         await self._invalidate_stale_insights(run_id, pool)
 
         summary = {
@@ -244,7 +191,6 @@ class AudioClusteringUseCase:
                 result["umap_x"],      result["umap_y"],
             )
         ]
-        # clustering_run_id always updated — cluster IDs only compare within same run_id
         sql = """
             INSERT INTO song_clusters
                 (spotify_id, country, audio_cluster_id, umap_audio_x, umap_audio_y,
@@ -262,17 +208,6 @@ class AudioClusteringUseCase:
         return len(rows)
 
     async def _invalidate_stale_insights(self, run_id: str, pool) -> None:
-        """
-        Deletes insights computed against a different clustering run.
-
-        K-Means cluster IDs have no stable meaning between runs — cluster 3
-        in run A and cluster 3 in run B are completely different groups.
-        Any insight that references a cluster from a previous run is semantically
-        wrong and must be recomputed.
-
-        This runs automatically at the end of every clustering pipeline so the
-        DB never silently holds mismatched data.
-        """
         async with pool.acquire() as conn:
             deleted = await conn.fetchval("""
                 WITH del AS (
@@ -288,15 +223,12 @@ class AudioClusteringUseCase:
                   f"(clustering_run_id != {run_id})")
 
 
-# ── CPU work (runs in ThreadPoolExecutor) ──────────────────────────────────────
-
 def _cpu_work(
     spotify_ids: list[str],
     X_raw: np.ndarray,
     k_min: int,
     k_max: int,
 ) -> dict:
-    """Scale → silhouette sweep → final K-Means → UMAP.  Pure CPU, no I/O."""
     from sklearn.preprocessing import StandardScaler
     from sklearn.cluster import KMeans
     from sklearn.metrics import silhouette_score
@@ -310,7 +242,6 @@ def _cpu_work(
     sample = min(n, 5_000)
     scores: dict[int, float] = {}
 
-    # cap k_max so it's always < n_samples
     k_max_eff = min(k_max, n - 1)
     k_min_eff = min(k_min, k_max_eff)
 
@@ -329,7 +260,6 @@ def _cpu_work(
     km_final = KMeans(n_clusters=best_k, random_state=42, n_init="auto")
     labels   = km_final.fit_predict(X_scaled)
 
-    # UMAP — n_neighbors capped to dataset size
     n_neighbors = min(UMAP_N_NEIGHBORS, n - 1)
     reducer  = umap_lib.UMAP(
         n_components = 2,
@@ -350,7 +280,5 @@ def _cpu_work(
         "scores":      scores,
     }
 
-
-# ── singleton ──────────────────────────────────────────────────────────────────
 
 audio_clustering_uc = AudioClusteringUseCase()

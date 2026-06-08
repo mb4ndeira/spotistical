@@ -10,9 +10,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _BASE_URL  = "https://content.guardianapi.com/search"
-_PAGE_SIZE = 200  # máximo permitido pelo Guardian
+_PAGE_SIZE = 200
 
-# Mapeamento tema → seções do Guardian
 THEME_SECTIONS: dict[str, list[str]] = {
     "music":   ["music", "culture", "film", "tv-and-radio"],
     "sports":  ["sport"],
@@ -21,12 +20,6 @@ THEME_SECTIONS: dict[str, list[str]] = {
 
 
 class GuardianDriver:
-    """The Guardian Open Platform API.
-
-    Gratuito, sem rate limit problemático (500 req/dia, 12 req/s).
-    Cobertura histórica desde 1999. Idioma: inglês.
-    Tone: não disponível na API — campo fica NULL.
-    """
 
     def _api_key(self) -> str:
         key = os.environ.get("GUARDIAN_API_KEY", "")
@@ -44,11 +37,6 @@ class GuardianDriver:
         request_counter: list[int] | None = None,
         daily_limit: int = 490,
     ) -> list[dict[str, Any]]:
-        """Busca todos os artigos de um tema numa janela de datas (paginado).
-
-        request_counter: lista de um elemento [n] compartilhada pelo caller para contar
-        requests feitos hoje. Se atingir daily_limit, para a paginação graciosamente.
-        """
         sections = THEME_SECTIONS.get(theme, [theme])
         results: list[dict[str, Any]] = []
 
