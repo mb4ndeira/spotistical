@@ -1,5 +1,5 @@
 from __future__ import annotations
-import ast, json
+import ast, json, pathlib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -7,7 +7,10 @@ import seaborn as sns
 from sqlalchemy import text
 from style import GREEN, MUTED
 
-API = 'http://localhost:8000'
+API        = 'http://localhost:8000'
+_CACHE_DIR = pathlib.Path(__file__).parent.parent / 'data'
+_EMB_CACHE  = _CACHE_DIR / 'news_embeddings.npz'
+_UMAP_CACHE = _CACHE_DIR / 'news_umap.npz'
 
 
 def compute_embeddings(engine, admin_engine, model_name: str, batch_size: int = 256) -> None:
@@ -19,6 +22,7 @@ def compute_embeddings(engine, admin_engine, model_name: str, batch_size: int = 
     """, engine)
     if pendentes.empty:
         print('Todos os artigos já têm embedding.')
+        _EMB_CACHE.unlink(missing_ok=True)
         return
     print(f'Carregando modelo {model_name}...')
     model = SentenceTransformer(model_name)
@@ -38,13 +42,13 @@ def compute_embeddings(engine, admin_engine, model_name: str, batch_size: int = 
         done = min(i + batch_size, len(titles))
         print(f'  {done:,}/{len(titles):,}  ({done/len(titles)*100:.0f}%)', end='\r')
     print(f'\nEmbeddings salvos para {len(pendentes):,} artigos.')
+    _EMB_CACHE.unlink(missing_ok=True)
+    _UMAP_CACHE.unlink(missing_ok=True)
 
 
-def load_embeddings(engine) -> tuple[pd.DataFrame, np.ndarray]:
+def load_embeddings(engine, use_cache: bool = True) -> tuple[pd.DataFrame, np.ndarray]:
     df = pd.read_sql("""
-        SELECT id, title, published_at::date AS data,
-               source,
-               embedding::text AS emb_text
+        SELECT id, title, published_at::date AS data, source
         FROM   news_events
         WHERE  embedding IS NOT NULL
         ORDER  BY published_at
@@ -52,18 +56,47 @@ def load_embeddings(engine) -> tuple[pd.DataFrame, np.ndarray]:
     if df.empty:
         print('Sem embeddings — execute compute_embeddings() primeiro.')
         return df, np.array([])
-    print(f'{len(df):,} artigos com embedding')
-    X = np.array([ast.literal_eval(e) for e in df['emb_text']], dtype=np.float32)
-    print(f'Shape: {X.shape}')
+
+    if use_cache and _EMB_CACHE.exists():
+        cached = np.load(_EMB_CACHE, allow_pickle=True)
+        if len(cached['ids']) == len(df):
+            print(f'Cache carregado — {len(df):,} embeddings  (delete {_EMB_CACHE.name} para reforçar)')
+            return df, cached['vecs']
+        print('Cache desatualizado — recarregando do banco...')
+
+    print(f'Carregando {len(df):,} embeddings do banco...')
+    df_full = pd.read_sql("""
+        SELECT id, embedding::text AS emb_text
+        FROM   news_events
+        WHERE  embedding IS NOT NULL
+        ORDER  BY published_at
+    """, engine)
+    X = np.array([ast.literal_eval(e) for e in df_full['emb_text']], dtype=np.float32)
+    _CACHE_DIR.mkdir(exist_ok=True)
+    np.savez_compressed(_EMB_CACHE, vecs=X, ids=df_full['id'].values)
+    print(f'Cache salvo em {_EMB_CACHE}  ·  shape: {X.shape}')
     return df, X
 
 
-def compute_umap(df_emb: pd.DataFrame, X: np.ndarray) -> pd.DataFrame:
+def compute_umap(df_emb: pd.DataFrame, X: np.ndarray, use_cache: bool = True) -> pd.DataFrame:
+    if use_cache and _UMAP_CACHE.exists():
+        cached = np.load(_UMAP_CACHE)
+        if len(cached['coords']) == len(df_emb):
+            print(f'UMAP cache carregado  (delete {_UMAP_CACHE.name} para recomputar)')
+            df_emb = df_emb.copy()
+            df_emb['umap_x'] = cached['coords'][:, 0]
+            df_emb['umap_y'] = cached['coords'][:, 1]
+            return df_emb
+        print('UMAP cache desatualizado — recomputando...')
+
     import umap
     print('Calculando UMAP 2D...')
     reducer = umap.UMAP(n_components=2, n_neighbors=15, min_dist=0.1,
-                        metric='cosine', random_state=42, low_memory=True)
+                        metric='cosine', random_state=42)
     coords = reducer.fit_transform(X)
+    _CACHE_DIR.mkdir(exist_ok=True)
+    np.savez_compressed(_UMAP_CACHE, coords=coords)
+    print(f'UMAP cache salvo em {_UMAP_CACHE}')
     df_emb = df_emb.copy()
     df_emb['umap_x'] = coords[:, 0]
     df_emb['umap_y'] = coords[:, 1]
